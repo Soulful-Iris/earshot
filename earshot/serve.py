@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import mkdtemp
 
-from . import decode, measure, report
+from . import decode, measure, report, studio
 
 MAX_MB = 80
 MAX_MINUTES = 30.0
@@ -125,6 +125,39 @@ def analyse_url(url: str) -> dict:
         tmp.rmdir()
 
 
+def parse_multipart(body: bytes, content_type: str) -> tuple[dict, bytes, str]:
+    """One file plus some plain fields. Enough for this form and nothing more.
+
+    Written out rather than using `cgi.FieldStorage`, which is deprecated in
+    3.12 and gone in 3.13 -- a dependency with a removal date already published
+    is not one to build a new thing on.
+    """
+    marker = "boundary="
+    if marker not in content_type:
+        raise studio.Refused("that upload was malformed")
+    boundary = content_type.split(marker, 1)[1].strip().strip('"')
+    sep = b"--" + boundary.encode()
+    fields: dict[str, str] = {}
+    payload, filename = b"", ""
+    for part in body.split(sep):
+        if b"\r\n\r\n" not in part:
+            continue
+        head, value = part.split(b"\r\n\r\n", 1)
+        value = value.rstrip(b"\r\n-")
+        headers = head.decode("utf8", "replace")
+        if 'name="' not in headers:
+            continue
+        name = headers.split('name="', 1)[1].split('"', 1)[0]
+        if 'filename="' in headers:
+            filename = headers.split('filename="', 1)[1].split('"', 1)[0]
+            payload = value
+        else:
+            fields[name] = fields.get(name, "")
+            fields[name] = (fields[name] + "," if fields[name] else "") + \
+                value.decode("utf8", "replace")
+    return fields, payload, filename
+
+
 PAGE = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>earshot &mdash; is the dialogue actually audible?</title>
@@ -205,8 +238,56 @@ class Handler(BaseHTTPRequestHandler):
     def _who(self) -> str:
         return self.headers.get("CF-Connecting-IP") or self.client_address[0]
 
+    def _studio_page(self) -> bytes:
+        html = (Path(__file__).resolve().parent / "studio.html").read_text()
+        return (html.replace("__MAX_MB__", str(studio.MAX_MB))
+                    .replace("__MAX_MIN__", str(int(studio.MAX_MINUTES)))
+                    .replace("__KEEP__", str(studio.KEEP_HOURS))).encode()
+
     def do_GET(self):
         if self.path in ("/", "/index.html"):
+            self._send(200, self._studio_page(), "text/html; charset=utf-8")
+            return
+        if self.path == "/parts":
+            from . import separate
+            names = separate.available(separate.SIX)
+            self._json(200, {"parts": [{"name": n, "what": separate.PARTS[n]}
+                                       for n in names]})
+            return
+        if self.path.startswith("/jobs/"):
+            rest = self.path[len("/jobs/"):].split("?")[0].split("/")
+            jid = rest[0]
+            if not jid.isalnum() or len(jid) > 32:
+                self._send(404, b"no", "text/plain")
+                return
+            d = studio.JOBS / jid
+            if not d.is_dir():
+                self._json(404, {"state": "unknown"})
+                return
+            if len(rest) == 1:
+                self._json(200, studio.describe(studio.Job(jid, d)))
+                return
+            # A stem download. The name is taken from our own status file, never
+            # from the URL, so no path from outside chooses what gets served.
+            wanted = rest[1]
+            allowed = set((studio.Job(jid, d).status.get("parts") or {}).values())
+            if wanted not in allowed:
+                self._send(404, b"no", "text/plain")
+                return
+            f = d / "out" / wanted
+            if not f.is_file():
+                self._send(404, b"no", "text/plain")
+                return
+            body = f.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{wanted}"')
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ("/measure", "/measure/"):
             # str.replace, not %-formatting: the stylesheet contains `100%`
             # and `%` formatting choked on it, so the page raised before any
             # header was sent and the tunnel returned a bare 502. /health was
@@ -222,6 +303,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
+
+        if self.path == "/jobs":
+            if length > (studio.MAX_MB + 2) << 20:
+                # Refuse before reading. Draining 200 MB into memory to then
+                # say no is how you get taken down politely.
+                self._json(413, {"ok": False,
+                                 "why": f"that file is over {studio.MAX_MB} MB"})
+                return
+            raw = self.rfile.read(length)
+            try:
+                fields, payload, filename = parse_multipart(
+                    raw, self.headers.get("Content-Type", ""))
+                if not payload:
+                    raise studio.Refused("no file arrived")
+                parts = [p for p in (fields.get("part", "")).split(",") if p]
+                job = studio.new_job(payload, filename or "upload.mp3", parts,
+                                     __import__("earshot.separate", fromlist=["x"]).SIX)
+                self._json(200, {"ok": True, "id": job.id})
+            except studio.Refused as e:
+                self._json(400, {"ok": False, "why": str(e)})
+            except Exception:                                 # noqa: BLE001
+                traceback.print_exc()
+                self._json(500, {"ok": False, "why": "that broke on my side, sorry"})
+            return
+
         raw = self.rfile.read(min(length, 4096))
         if self.path != "/analyse":
             self._send(404, b"no", "text/plain")
@@ -266,7 +372,21 @@ class Handler(BaseHTTPRequestHandler):
             _job.release()
 
 
+def _sweeper() -> None:
+    """Old jobs go on a timer. Written as a loop rather than left to a cron I
+    would have to remember: somebody's music should not sit on this machine."""
+    while True:
+        time.sleep(1800)
+        try:
+            gone = studio.sweep()
+            if gone:
+                print(f"swept {gone} finished job(s)", flush=True)
+        except Exception:                                     # noqa: BLE001
+            traceback.print_exc()
+
+
 def main() -> None:
+    threading.Thread(target=_sweeper, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"earshot on 127.0.0.1:{PORT}", flush=True)
     srv.serve_forever()

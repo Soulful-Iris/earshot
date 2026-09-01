@@ -46,18 +46,28 @@ SEGMENT = 5.0
 OVERLAP = 0.25
 MODEL_SR = 44100          # what htdemucs was trained at; resample, do not guess
 
-_model = None
+_models: dict = {}
 
 
-def model():
-    """Loaded once. Importing demucs costs seconds and ~300 MB."""
-    global _model
-    if _model is None:
+def model(name: str = "htdemucs"):
+    """Loaded once per name. Importing demucs costs seconds and ~300 MB.
+
+    Measured peak RSS on this box: htdemucs 1.29 GB, htdemucs_6s 1.37-1.44 GB.
+    Window size barely moves it -- 2.5 s peaked HIGHER than 4.0 s and was slower
+    per second of audio -- because the peak is the model and the runtime, not the
+    window. So the protection against a job taking the machine down is a memory
+    cap on the process, not a smaller segment.
+    """
+    global _models
+    if name not in _models:
+        import io, contextlib
         from demucs.pretrained import get_model
-        m = get_model("htdemucs")
+        quiet = io.StringIO()
+        with contextlib.redirect_stderr(quiet), contextlib.redirect_stdout(quiet):
+            m = get_model(name)
         m.eval()
-        _model = m
-    return _model
+        _models[name] = m
+    return _models[name]
 
 
 @dataclass
@@ -66,6 +76,7 @@ class Stems:
     background: Path
     seconds: float
     peak_rss_mb: float | None = None
+    parts: dict = None      # every stem actually written, by name
 
 
 def _write(path: Path, audio: np.ndarray, sr: int) -> None:
@@ -97,15 +108,53 @@ class _Encoder:
                 self.proc.stderr.read().decode("utf8", "replace")[:400])
 
 
+# What a person can ask for, and what each one is made of. `htdemucs_6s` returns
+# six sources; everything else here is arithmetic on them.
+#
+# "band" is the input MINUS the vocals, not the other five added together.
+# Summing would silently drop whatever none of the six accounted for; the
+# subtraction cannot, so voice + band is always exactly the original.
+PARTS = {
+    "vocals": "the singing or the talking",
+    "band":   "everything except the vocals",
+    "drums":  "kit, percussion",
+    "bass":   "bass guitar, synth bass",
+    "guitar": "guitars",
+    "piano":  "piano, keys",
+    "other":  "whatever is left: strings, pads, brass, anything unlabelled",
+}
+SIX = "htdemucs_6s"
+FOUR = "htdemucs"
+
+
+def available(model_name: str = SIX) -> list[str]:
+    """Which parts this model can actually produce."""
+    sources = model(model_name).sources
+    out = ["vocals", "band"] if "vocals" in sources else []
+    return out + [s for s in ("drums", "bass", "guitar", "piano", "other")
+                  if s in sources]
+
+
 def split(path: str | Path, out_dir: str | Path,
-          segment: float = SEGMENT) -> Stems:
-    """Separate into voice and everything-else, streaming.
+          segment: float = SEGMENT, parts: list[str] | None = None,
+          model_name: str = FOUR,
+          on_progress=None) -> Stems:
+    """Separate a file into whichever parts were asked for, streaming.
 
     Nothing whole-file is ever in memory. A ninety-minute film at 44.1 kHz
     stereo is 1.9 GB as float32 and this machine has 1.8 GB, so a version that
     read the file in would work on every fixture and die on the first real thing
-    anyone pointed it at. The windows are crossfaded and written out behind the
-    read head; only two windows and the crossfade tail are resident.
+    anyone pointed it at. Windows are crossfaded and written out behind the read
+    head; only two windows and the crossfade tail are resident.
+
+    `parts` defaults to vocals and band, which is what every caller inside this
+    project wants. Ask for more and each one costs disk and an ffmpeg pipe, but
+    no extra passes: the model produces all its sources per window regardless,
+    so six stems cost the same compute as one.
+
+    `on_progress(done_seconds, total_seconds)` is called as it goes, because at
+    two to four times realtime a page with no progress is a page that looks
+    broken.
     """
     import torch
     from demucs.apply import apply_model
@@ -115,74 +164,94 @@ def split(path: str | Path, out_dir: str | Path,
     out.mkdir(parents=True, exist_ok=True)
     media = decode.probe(src)
 
-    m = model()
-    vi = m.sources.index("vocals")
+    m = model(model_name)
+    sources = list(m.sources)
+    want = list(parts) if parts else ["vocals", "band"]
+    unknown = [p for p in want if p not in PARTS]
+    if unknown:
+        raise ValueError(f"no such part: {unknown}. Known: {sorted(PARTS)}")
+    missing = [p for p in want if p not in ("vocals", "band") and p not in sources]
+    if missing:
+        raise ValueError(f"{model_name} cannot separate {missing}; it has {sources}")
+
+    # Which model outputs actually have to be reconstructed this run.
+    needed = {p for p in want if p in sources}
+    if "vocals" in want or "band" in want:
+        needed.add("vocals")
+    index = {name: sources.index(name) for name in needed}
+
     step = int(segment * MODEL_SR)
     hop = max(1, int(step * (1 - OVERLAP)))
     tail = step - hop
     win = np.hanning(step + 2)[1:-1].astype(np.float32)
 
-    vpath, bpath = out / (src.stem + ".voice.wav"), out / (src.stem + ".bg.wav")
-    venc = _Encoder(vpath, 2, MODEL_SR)
-    benc = _Encoder(bpath, 2, MODEL_SR)
+    paths = {p: out / f"{src.stem}.{p}.wav" for p in want}
+    encs = {p: _Encoder(paths[p], 2, MODEL_SR) for p in want}
 
-    buf = np.zeros((0, 2), dtype=np.float32)          # not yet separated
-    carry_v = np.zeros((tail, 2), dtype=np.float32)   # overlap from last window
+    buf = np.zeros((0, 2), dtype=np.float32)
+    carry = {name: np.zeros((tail, 2), dtype=np.float32) for name in needed}
     carry_w = np.zeros(tail, dtype=np.float32)
-    carry_x = np.zeros((tail, 2), dtype=np.float32)   # the same span of input
     total = 0
+    emitted = 0
+    duration = media.duration
 
     def process(chunk: np.ndarray, final: bool) -> None:
-        """chunk is (step, 2); emit the first `hop` samples, carry the rest."""
-        nonlocal carry_v, carry_w, carry_x
+        nonlocal carry, carry_w, emitted
         ref = chunk.mean(1)
         mean, std = float(ref.mean()), float(ref.std() + 1e-8)
         with torch.no_grad():
             x = torch.from_numpy(((chunk - mean) / std).T).float()[None]
-            sources = apply_model(m, x, split=False, overlap=0.0,
-                                  progress=False, device="cpu")[0]
-        voice = (sources[vi].numpy().T * std + mean).astype(np.float32)
-        del sources, x
+            got = apply_model(m, x, split=False, overlap=0.0,
+                              progress=False, device="cpu")[0]
 
         w = win[:len(chunk)]
-        acc_v = voice * w[:, None]
-        acc_w = w.copy()
-        # The carry can be LONGER than the final chunk when the file ends inside
-        # the overlap region, and it always is when the whole file is shorter
-        # than one window. Without the clamp this raised a broadcast error on
-        # any input under about four seconds -- which every probe in
-        # `will_it_help` is, so the predictor could not run at all.
-        k = min(len(carry_v), len(acc_v))
-        acc_v[:k] += carry_v[:k]
-        acc_w[:k] += carry_w[:k]
-
         emit = len(chunk) if final else hop
+        acc_w = w.copy()
+        k = min(len(carry_w), len(acc_w))
+        acc_w[:k] += carry_w[:k]
         weight = np.maximum(acc_w[:emit], 1e-9)[:, None]
-        v = acc_v[:emit] / weight
-        venc.write(v)
-        # Background is the input minus the voice, sample for sample. Summing
-        # the model's other three stems instead would silently drop whatever
-        # none of the four accounted for.
-        benc.write(chunk[:emit] - v)
+
+        done = {}
+        for name, i in index.items():
+            stem = (got[i].numpy().T * std + mean).astype(np.float32)
+            acc = stem * w[:, None]
+            acc[:k] += carry[name][:k]
+            done[name] = acc[:emit] / weight
+            if not final:
+                carry[name] = acc[emit:]
+        del got, x
+
+        for p, enc in encs.items():
+            if p == "band":
+                enc.write(chunk[:emit] - done["vocals"])
+            else:
+                enc.write(done[p])
         if not final:
-            carry_v, carry_w, carry_x = acc_v[emit:], acc_w[emit:], chunk[emit:]
+            carry_w = acc_w[emit:]
+        emitted += emit
+        if on_progress:
+            on_progress(emitted / MODEL_SR, duration)
 
     for block in decode.stream(media, sr=MODEL_SR, channels=2, chunk_seconds=10.0):
         buf = np.concatenate([buf, block.astype(np.float32)])
         total += len(block)
-        while len(buf) >= step + (len(carry_x) and 0):
+        while len(buf) >= step:
             process(buf[:step], final=False)
             buf = buf[hop:]
 
     if len(buf) >= 1024:
         process(buf, final=True)
     elif len(buf):
-        venc.write(buf)
-        benc.write(np.zeros_like(buf))
+        for p, enc in encs.items():
+            enc.write(buf if p == "band" else np.zeros_like(buf))
 
-    venc.close()
-    benc.close()
-    return Stems(voice=vpath, background=bpath, seconds=total / MODEL_SR)
+    for enc in encs.values():
+        enc.close()
+    if on_progress:
+        on_progress(duration, duration)
+    return Stems(voice=paths.get("vocals", next(iter(paths.values()))),
+                 background=paths.get("band", next(iter(paths.values()))),
+                 seconds=total / MODEL_SR, parts=paths)
 
 
 # ---------------------------------------------------------------------------

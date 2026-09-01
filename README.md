@@ -1,6 +1,40 @@
 # earshot
 
-**Is the dialogue actually audible, or is it you?**
+## [earshot.soulful-ai.dev](https://earshot.soulful-ai.dev) — put a song in, take it apart
+
+Upload an mp3, tick what you want out of it, get the files back:
+
+**vocals** · **band** (everything but the vocals) · **drums** · **bass** ·
+**guitar** · **piano** · **other**
+
+Measured on a 30-second rock track, all six stems in one pass:
+
+| stem | level | below 200 Hz | 2–8 kHz |
+|---|---|---|---|
+| vocals | −15.1 dB | 0% | 25% |
+| drums | −13.5 | 80% | 5% |
+| bass | −17.9 | **91%** | 3% |
+| guitar | −17.9 | 6% | **42%** |
+| piano | −68.5 | — | — |
+
+The stems are genuinely independent, not copies: pairwise correlation between
+them is at most 0.12. And **piano came back at −68 dB because that song has no
+piano**, so the page says *not in this track* rather than handing over a silent
+file you have to open to understand.
+
+It runs at about **3× realtime** on two cores with no GPU — a three-minute song
+is roughly ten minutes — so progress is reported in seconds done out of seconds
+total rather than as a spinner, one job runs at a time and the rest queue, and
+the worker runs in its own process under a memory cap. That cap is
+[proved to fire, with a control](tools/check_memory_cap.py): 500 MB under a
+200 MB cap is killed, and the identical allocation succeeds uncapped.
+
+Under 25 MB, under 6 minutes, files deleted after 6 hours.
+
+---
+
+**The other half of this project: is the dialogue actually audible, or is it
+you?**
 
 Point it at a film, an episode, a podcast or a lecture recording and it tells
 you how far the talking sits above everything under it, where in the runtime it

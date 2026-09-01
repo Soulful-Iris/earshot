@@ -1,0 +1,172 @@
+<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>earshot &mdash; pull a song apart</title>
+<style>
+ :root{color-scheme:dark}
+ *{box-sizing:border-box}
+ body{background:#0d0f12;color:#e7e3dc;font:16px/1.55 ui-sans-serif,system-ui,sans-serif;
+      margin:0;padding:2.2rem 1.2rem;display:flex;justify-content:center}
+ main{width:100%;max-width:44rem}
+ h1{font-size:1.6rem;margin:0 0 .2rem;letter-spacing:-.015em}
+ h2{font-size:1rem;margin:2.2rem 0 .7rem;color:#9aa0a6;font-weight:600;
+    text-transform:uppercase;letter-spacing:.06em}
+ .sub{color:#9aa0a6;margin:0 0 1.8rem}
+ .drop{border:1.5px dashed #2f3540;border-radius:.7rem;padding:1.6rem 1rem;text-align:center;
+       background:#12151a;cursor:pointer;transition:border-color .15s,background .15s}
+ .drop:hover,.drop.over{border-color:#c8a24a;background:#171b21}
+ .drop b{color:#e7e3dc}
+ .drop span{color:#7d848c;font-size:.9rem}
+ #file{display:none}
+ .parts{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem;margin:.2rem 0}
+ label.part{display:flex;gap:.6rem;align-items:flex-start;background:#14171c;
+            border:1px solid #23272e;border-radius:.5rem;padding:.6rem .7rem;cursor:pointer}
+ label.part:has(input:checked){border-color:#c8a24a;background:#1a1a15}
+ label.part input{margin:.25rem 0 0}
+ label.part .n{font-weight:600}
+ label.part .d{color:#7d848c;font-size:.85rem;display:block}
+ button{background:#c8a24a;color:#15120a;border:0;border-radius:.5rem;
+        padding:.75rem 1.3rem;font:600 1rem inherit;cursor:pointer;margin-top:1.1rem}
+ button[disabled]{opacity:.45;cursor:default}
+ .bar{height:.5rem;background:#1c2027;border-radius:1rem;overflow:hidden;margin:.7rem 0 .4rem}
+ .bar i{display:block;height:100%;background:#c8a24a;width:0;transition:width .4s}
+ .note{color:#9aa0a6;font-size:.92rem}
+ .err{color:#e0806f}
+ table{width:100%;border-collapse:collapse;margin-top:.6rem}
+ td{padding:.5rem .3rem;border-bottom:1px solid #1e222a;vertical-align:middle}
+ td.lv{color:#7d848c;font:13px ui-monospace,monospace;text-align:right;white-space:nowrap}
+ .absent{color:#7d848c}
+ a.dl{color:#c8a24a;text-decoration:none;font-weight:600}
+ .why{color:#9aa0a6;font-size:.92rem;margin-top:2.4rem;border-top:1px solid #23272e;padding-top:1.2rem}
+ .why b{color:#e7e3dc}
+ a{color:#c8a24a}
+ audio{width:100%;margin-top:.35rem}
+</style>
+<main>
+<h1>earshot</h1>
+<p class=sub>Put a song in. Take it apart.</p>
+
+<label class=drop id=drop for=file>
+  <b id=dropname>Choose an mp3</b><br>
+  <span>or drop one here &mdash; under __MAX_MB__ MB, under __MAX_MIN__ minutes</span>
+  <input id=file type=file accept="audio/*">
+</label>
+
+<h2>What do you want out of it</h2>
+<div class=parts id=parts></div>
+
+<button id=go disabled>Separate</button>
+
+<div id=running hidden>
+  <div class=bar><i id=fill></i></div>
+  <div class=note id=progress></div>
+</div>
+
+<div id=result hidden>
+  <h2>Stems</h2>
+  <table id=stems></table>
+  <p class=note id=foot></p>
+</div>
+
+<p class=note id=error hidden></p>
+
+<div class=why>
+<p>This runs a source-separation model on a small machine with no graphics card,
+at roughly <b>two to four times realtime</b> &mdash; a three minute song takes
+about ten minutes. One job runs at a time and the rest queue, because two at
+once does not fit in the memory.</p>
+<p>Anything the song does not contain comes back nearly silent rather than
+missing, so the level of each stem is shown and the empty ones are marked. A
+piano stem from a song with no piano is a real output and a useless one.</p>
+<p>Files are deleted after __KEEP__ hours. There is also a
+<a href="/measure">dialogue meter</a> for the other half of this project.</p>
+</div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let picked = null, jobId = null;
+
+fetch('/parts').then(r => r.json()).then(d => {
+  $('#parts').innerHTML = d.parts.map(p =>
+    `<label class=part><input type=checkbox name=part value="${p.name}"
+      ${['vocals','band'].includes(p.name) ? 'checked' : ''}>
+      <span><span class=n>${p.name}</span><span class=d>${p.what}</span></span></label>`).join('');
+});
+
+$('#file').addEventListener('change', e => setFile(e.target.files[0]));
+['dragover','dragenter'].forEach(t => $('#drop').addEventListener(t, e => {
+  e.preventDefault(); $('#drop').classList.add('over'); }));
+['dragleave','drop'].forEach(t => $('#drop').addEventListener(t, e => {
+  e.preventDefault(); $('#drop').classList.remove('over'); }));
+$('#drop').addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
+
+function setFile(f) {
+  if (!f) return;
+  picked = f;
+  $('#dropname').textContent = f.name + '  (' + (f.size/1048576).toFixed(1) + ' MB)';
+  $('#go').disabled = false;
+}
+
+function fail(msg) {
+  $('#error').hidden = false;
+  $('#error').className = 'note err';
+  $('#error').textContent = msg;
+  $('#go').disabled = false;
+  $('#running').hidden = true;
+}
+
+$('#go').onclick = async () => {
+  if (!picked) return;
+  const parts = [...document.querySelectorAll('input[name=part]:checked')].map(i => i.value);
+  if (!parts.length) return fail('pick at least one thing to pull out');
+  $('#go').disabled = true; $('#error').hidden = true;
+  $('#result').hidden = true; $('#running').hidden = false;
+  $('#progress').textContent = 'uploading…';
+
+  const fd = new FormData();
+  fd.append('file', picked);
+  parts.forEach(p => fd.append('part', p));
+  let d;
+  try {
+    d = await (await fetch('/jobs', {method:'POST', body: fd})).json();
+  } catch (e) { return fail('that upload did not go through: ' + e); }
+  if (!d.ok) return fail(d.why || 'that did not work');
+  jobId = d.id;
+  poll();
+};
+
+async function poll() {
+  let d;
+  try { d = await (await fetch('/jobs/' + jobId)).json(); }
+  catch (e) { return setTimeout(poll, 4000); }
+
+  if (d.state === 'queued') {
+    $('#progress').textContent = d.ahead
+      ? `waiting, ${d.ahead} job${d.ahead>1?'s':''} ahead`
+      : 'starting…';
+  } else if (d.state === 'working') {
+    const pct = d.total_seconds ? Math.min(100, 100*d.done_seconds/d.total_seconds) : 0;
+    $('#fill').style.width = pct + '%';
+    const left = (d.done_seconds > 2 && d.elapsed)
+      ? `, about ${Math.ceil((d.elapsed/d.done_seconds)*(d.total_seconds-d.done_seconds)/60)} min left`
+      : '';
+    $('#progress').textContent =
+      `${Math.floor(d.done_seconds)}s of ${Math.floor(d.total_seconds)}s done${left}`;
+  } else if (d.state === 'done') {
+    $('#fill').style.width = '100%';
+    $('#running').hidden = true; $('#result').hidden = false; $('#go').disabled = false;
+    const rows = Object.entries(d.found || {}).map(([name, f]) => f.present
+      ? `<tr><td><span class=n>${name}</span>
+           <audio controls preload=none src="/jobs/${jobId}/${f.file}"></audio></td>
+         <td class=lv>${f.lufs} LUFS</td>
+         <td><a class=dl href="/jobs/${jobId}/${f.file}" download>download</a></td></tr>`
+      : `<tr><td class=absent>${name} <span class=d>&mdash; not in this track</span></td>
+         <td class=lv>${f.lufs === null ? 'silent' : f.lufs + ' LUFS'}</td><td></td></tr>`);
+    $('#stems').innerHTML = rows.join('');
+    $('#foot').textContent = `took ${Math.round(d.elapsed)}s. files go in __KEEP__ hours.`;
+    return;
+  } else if (d.state === 'failed') {
+    return fail(d.why || 'the job failed');
+  }
+  setTimeout(poll, 2500);
+}
+</script>
