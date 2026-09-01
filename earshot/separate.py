@@ -515,3 +515,72 @@ def verify(original: str | Path, stems: Stems) -> Checked:
     return Checked(reconstruction_db=db(resid) - db(orig[:n]),
                    second_pass_db=db(left) - db(band),
                    vocal_db=db(voc), band_db=db(band))
+
+
+# ---------------------------------------------------------------------------
+# Not every mp3 is a song, and not every song has every instrument.
+# ---------------------------------------------------------------------------
+
+# Thresholds in dB relative to the whole mix, taken from measurement rather than
+# invented. Three 30-second files through htdemucs_6s, 2026-09-01:
+#
+#             vocals  drums   bass  guitar  piano  other   band
+#   speech       0.0      -      -       -      -  -48.8  -35.6
+#   house      -42.9   -1.6   -8.8       -  -57.1   -8.4   -0.0
+#   rock        -2.8   -6.2  -11.2    -6.1  -58.6  -31.4   -2.3
+#
+# ("-" is digital silence: the model returned nothing at all for that source.)
+#
+# The gap between a part that is there and one that is not is enormous -- house
+# has `other` at -8.4 and piano at -57.1 -- so the line does not need to be
+# precise, it needs to exist. -30 dB puts every measured present part above it
+# and every absent one well below.
+PRESENT_DB = -30.0
+FAINT_DB = -45.0
+
+
+def classify(levels: dict) -> dict:
+    """What kind of recording is this, and which parts are actually in it.
+
+    Bruno: *"Not all mp3 will be music. And not all music has all those
+    instruments (think house music) so like it should be able to handle
+    different complex cases and give me different responses based on it. But
+    voice alone should always be one of the returns."*
+
+    So the page stops asking up front and starts answering. `levels` is each
+    stem's loudness relative to the mix; the return says what was found and what
+    to call it, because "band" is the wrong word for the hiss behind a podcast.
+    """
+    def status(name: str) -> str:
+        v = levels.get(name)
+        if v is None:
+            return "absent"
+        if v >= PRESENT_DB:
+            return "present"
+        return "faint" if v >= FAINT_DB else "absent"
+
+    instruments = ("drums", "bass", "guitar", "piano", "other")
+    playing = [i for i in instruments if status(i) == "present"]
+    voice = status("vocals")
+
+    if voice == "present" and not playing:
+        kind = "a voice recording, not music"
+        background = "background noise"
+    elif voice == "present":
+        kind = "music with a voice in it"
+        background = "the backing, without the voice"
+    elif playing:
+        kind = "instrumental music, no voice found"
+        background = "everything, since there is no voice to remove"
+    else:
+        kind = "not much of anything the model recognises"
+        background = "everything except the voice"
+
+    return {
+        "kind": kind,
+        "playing": playing,
+        "voice": voice,
+        "band_means": background,
+        "status": {name: status(name) for name in
+                   ("vocals", "band", *instruments)},
+    }

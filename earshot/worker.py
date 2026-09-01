@@ -67,11 +67,31 @@ def main(argv: list[str] | None = None) -> int:
                          total_seconds=round(total, 1),
                          elapsed=round(now - started, 1))
 
+        model_name = spec.get("model", separate.SIX)
+        # Everything, always. The model produces all its sources per window
+        # regardless, so asking for one costs the same as asking for seven --
+        # which means there is no reason to make somebody choose before they
+        # know what is in the file. They choose afterwards, by downloading.
         stems = separate.split(
             source, job / "out",
-            parts=spec["parts"],
-            model_name=spec.get("model", separate.SIX),
+            parts=separate.available(model_name),
+            model_name=model_name,
             on_progress=progress)
+
+        # Measure each stem against the mix BEFORE encoding, so the numbers
+        # describe the separation and not the mp3 encoder.
+        import numpy as np
+        from .loudness import lufs_of
+
+        def rel(path):
+            x = decode.read_all(decode.probe(path), channels=1)[:, 0]
+            v = lufs_of(np.repeat(x[:, None], 2, axis=1))
+            return None if not np.isfinite(v) else round(v - mix_lufs, 1)
+
+        mix_x = decode.read_all(media, channels=1)[:, 0]
+        mix_lufs = lufs_of(np.repeat(mix_x[:, None], 2, axis=1))
+        levels = {n: rel(p) for n, p in (stems.parts or {}).items()}
+        del mix_x
 
         made = {}
         for name, path in (stems.parts or {}).items():
@@ -87,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
             path.unlink(missing_ok=True)
             made[name] = mp3.name
 
-        write_status(job, state="done", parts=made,
+        write_status(job, state="done", parts=made, levels=levels,
+                     verdict=separate.classify(levels),
                      elapsed=round(time.time() - started, 1))
         return 0
 

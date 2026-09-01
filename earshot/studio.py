@@ -73,10 +73,10 @@ def new_job(data: bytes, filename: str, parts: list[str], model: str) -> Job:
 
     if len(data) > MAX_MB << 20:
         raise Refused(f"that file is over {MAX_MB} MB")
-    known = separate.available(model)
-    parts = [p for p in parts if p in known]
-    if not parts:
-        raise Refused("pick at least one thing to pull out")
+    # `parts` is ignored on purpose and kept in the signature so old callers do
+    # not break. Everything is produced every time; choosing happens afterwards,
+    # when there is something to choose between.
+    parts = separate.available(model)
 
     jid = uuid.uuid4().hex[:12]
     d = JOBS / jid
@@ -194,35 +194,21 @@ def sweep(now: float | None = None) -> int:
 def describe(job: Job) -> dict:
     """Status, plus what was actually found -- which is half the answer.
 
-    A stem for an instrument the song does not contain comes out near-silent
-    rather than missing, and handing somebody a silent file they have to open to
-    understand is worse than telling them. Measured on a rock song with no
-    piano: piano -67 dB, other -49, against vocals -14 and drums -13.
+    The levels and the verdict are computed once by the worker, which has the
+    wav files in front of it, rather than re-derived here from the mp3s. Two
+    places measuring the same thing is two places to disagree.
     """
-    from . import decode
-    from .loudness import lufs_of
-    import numpy as np
-
     st = dict(job.status)
     st["id"] = job.id
     if st.get("state") == "done":
-        found = {}
-        for name, fname in (st.get("parts") or {}).items():
-            path = job.dir / "out" / fname
-            if not path.exists():
-                continue
-            try:
-                media = decode.probe(path)
-                sample = decode.read_all(media, channels=1)[:, 0]
-                level = lufs_of(np.repeat(sample[:, None], 2, axis=1))
-            except Exception:                                 # noqa: BLE001
-                level = float("nan")
-            found[name] = {
-                "file": fname,
-                "lufs": None if level != level or level == float("-inf") else round(level, 1),
-                "present": bool(level == level and level > -45.0),
-            }
-        st["found"] = found
+        levels = st.get("levels") or {}
+        verdict = st.get("verdict") or {}
+        status = verdict.get("status", {})
+        st["found"] = {
+            name: {"file": fname,
+                   "db": levels.get(name),
+                   "status": status.get(name, "present")}
+            for name, fname in (st.get("parts") or {}).items()}
     elif st.get("state") in (None, "queued"):
         st["ahead"] = position(job.id)
     return st

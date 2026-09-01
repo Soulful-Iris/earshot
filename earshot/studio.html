@@ -51,10 +51,10 @@
   <input id=file type=file accept="audio/*">
 </label>
 
-<h2>What do you want out of it</h2>
-<div class=parts id=parts></div>
-
-<button id=go disabled>Separate</button>
+<button id=go disabled>Pull it apart</button>
+<p class=note style="margin-top:.6rem">Everything the model can find is
+separated in one pass, so there is nothing to choose up front. What it found
+comes back below.</p>
 
 <div id=running hidden>
   <div class=bar><i id=fill></i></div>
@@ -62,7 +62,7 @@
 </div>
 
 <div id=result hidden>
-  <h2>Stems</h2>
+  <h2 id=verdict></h2>
   <table id=stems></table>
   <p class=note id=foot></p>
 </div>
@@ -84,13 +84,6 @@ piano stem from a song with no piano is a real output and a useless one.</p>
 <script>
 const $ = s => document.querySelector(s);
 let picked = null, jobId = null;
-
-fetch('/parts').then(r => r.json()).then(d => {
-  $('#parts').innerHTML = d.parts.map(p =>
-    `<label class=part><input type=checkbox name=part value="${p.name}"
-      ${['vocals','band'].includes(p.name) ? 'checked' : ''}>
-      <span><span class=n>${p.name}</span><span class=d>${p.what}</span></span></label>`).join('');
-});
 
 $('#file').addEventListener('change', e => setFile(e.target.files[0]));
 ['dragover','dragenter'].forEach(t => $('#drop').addEventListener(t, e => {
@@ -116,15 +109,12 @@ function fail(msg) {
 
 $('#go').onclick = async () => {
   if (!picked) return;
-  const parts = [...document.querySelectorAll('input[name=part]:checked')].map(i => i.value);
-  if (!parts.length) return fail('pick at least one thing to pull out');
   $('#go').disabled = true; $('#error').hidden = true;
   $('#result').hidden = true; $('#running').hidden = false;
   $('#progress').textContent = 'uploading…';
 
   const fd = new FormData();
   fd.append('file', picked);
-  parts.forEach(p => fd.append('part', p));
   let d;
   try {
     d = await (await fetch('/jobs', {method:'POST', body: fd})).json();
@@ -154,13 +144,26 @@ async function poll() {
   } else if (d.state === 'done') {
     $('#fill').style.width = '100%';
     $('#running').hidden = true; $('#result').hidden = false; $('#go').disabled = false;
-    const rows = Object.entries(d.found || {}).map(([name, f]) => f.present
-      ? `<tr><td><span class=n>${name}</span>
-           <audio controls preload=none src="/jobs/${jobId}/${f.file}"></audio></td>
-         <td class=lv>${f.lufs} LUFS</td>
-         <td><a class=dl href="/jobs/${jobId}/${f.file}" download>download</a></td></tr>`
-      : `<tr><td class=absent>${name} <span class=d>&mdash; not in this track</span></td>
-         <td class=lv>${f.lufs === null ? 'silent' : f.lufs + ' LUFS'}</td><td></td></tr>`);
+    const v = d.verdict || {};
+    $('#verdict').textContent = v.kind || 'what came out';
+    // Voice first and always, then whatever is actually playing, then the rest.
+    const order = ['vocals', 'band', 'drums', 'bass', 'guitar', 'piano', 'other'];
+    const label = n => n === 'band' ? (v.band_means || 'everything but the voice')
+                     : n === 'vocals' ? 'voice' : n;
+    const rows = order.filter(n => d.found && d.found[n]).map(n => {
+      const f = d.found[n];
+      const gone = f.status === 'absent';
+      const faint = f.status === 'faint';
+      const lvl = f.db === null || f.db === undefined ? 'silent' : f.db + ' dB';
+      if (gone) return `<tr><td class=absent>${label(n)}
+        <span class=d>&mdash; not in this recording</span></td>
+        <td class=lv>${lvl}</td><td></td></tr>`;
+      return `<tr><td><span class=n>${label(n)}</span>${faint
+          ? ' <span class=d>&mdash; only just there</span>' : ''}
+        <audio controls preload=none src="/jobs/${jobId}/${f.file}"></audio></td>
+        <td class=lv>${lvl}</td>
+        <td><a class=dl href="/jobs/${jobId}/${f.file}" download>download</a></td></tr>`;
+    });
     $('#stems').innerHTML = rows.join('');
     $('#foot').textContent = `took ${Math.round(d.elapsed)}s. files go in __KEEP__ hours.`;
     return;
