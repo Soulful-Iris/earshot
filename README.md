@@ -113,12 +113,37 @@ also answers a doorbell; an open endpoint for it is a way to be taken down by
 one polite visitor. Measurement is public because it is seconds. Separation is
 the command line.
 
-**What I still cannot tell you.** A speech recogniser scored the before and the
-after identically -- 0.024 word error rate either way -- not because separation
-did nothing but because Nova-3 already understood the buried version, and reads
-speech five LU *under* a bed with no errors at all. The ceiling is the
-instrument. Every number above is against ground-truth stems, and whether it
-*sounds* better is a judgement no tool here can make.
+**Corrected, and it changes what the table above means.** The synthetic bed
+those fixtures used put **92.4% of its energy below 300 Hz** and 1.6% in the
+300 Hz - 1 kHz band where speech lives. It was a rumble. It never masked the
+voice, a phone barely reproduces it, and so those SI-SDR gains are for pulling a
+bass hum off clean speech -- a real measurement of an easier problem than the one
+this project is about. Bruno listened to a before/after pair and said they
+sounded identical; they did.
+
+`tools/make_fixtures.py` now **refuses** any background with under 25% of its
+energy between 300 Hz and 4 kHz. The old bed measures 4.3% and fails hard. Real
+public-domain films measure 48-90%.
+
+**On real material, chosen by the tool rather than by me.**
+`tools/find_a_bad_one.py` walks public-domain films and ranks them by how buried
+the dialogue is. The worst it found was *Radio at War* (1944), narration sitting
+**5 LU under the score**. Through `--enhance`:
+
+| | measured ratio | dialogue level | background |
+|---|---|---|---|
+| original | **−4.9 LU** | −19.7 LUFS | −20.6 |
+| enhanced | **+4.9 LU** | −19.4 | −25.2 |
+| voice only | **+18.6 LU** | −19.5 | −24.0 |
+
+The dialogue holds its level throughout while the background falls away, which
+is the shape of a separation.
+
+**What I still cannot tell you.** A speech recogniser transcribed all three of
+those clips *word for word identically* — the same 53 words. Nova-3 reads speech
+five LU under a score without errors, so it cannot grade this at all. The
+ceiling is the instrument. Whether it *sounds* better is a judgement no tool
+here can make.
 
 ### `--fix` — level only, no separation
 

@@ -145,22 +145,80 @@ def at_lufs(mono: np.ndarray, target: float) -> np.ndarray:
     return mono * 10.0 ** ((target - now) / 20.0)
 
 
-def music_bed(n: int, seed: int = 7) -> np.ndarray:
-    """Something with the spectral shape of a score, not white noise.
+MIN_MIDRANGE = 0.25     # share of bed energy that must sit in 300 Hz - 4 kHz
 
-    Pink-ish noise plus a slow chord. White noise would be trivially separable
-    from speech by any energy measure and would flatter every result.
+
+def midrange_share(x: np.ndarray) -> float:
+    """Fraction of a signal's energy in the band where speech lives."""
+    n = 1 << 15
+    if len(x) < n:
+        return 0.0
+    frames = x[: len(x) // n * n].reshape(-1, n)
+    P = (np.abs(np.fft.rfft(frames * np.hanning(n), axis=1)) ** 2).mean(0)
+    f = np.fft.rfftfreq(n, 1 / SR)
+    return float(P[(f >= 300) & (f < 4000)].sum() / max(P.sum(), 1e-30))
+
+
+def check_masks_speech(bed: np.ndarray, name: str) -> None:
+    """Refuse a background that cannot mask a voice.
+
+    This exists because of a specific failure, on 2026-09-01. Bruno listened to
+    a before/after pair and said they sounded identical. They did. The bed I had
+    been building all day put 92.4% of its energy below 300 Hz and 1.6% of it in
+    the 300 Hz - 1 kHz band where speech lives -- a rumble, not music. It never
+    masked anything, a phone speaker does not reproduce it, and every separation
+    score I had measured was for pulling a bass hum off clean speech.
+
+    Real public-domain films measure 48% to 90% here. A number under
+    MIN_MIDRANGE means the fixture is testing an easier problem than the one the
+    project is about, and no amount of remembering that has ever worked: this is
+    the third corpus-shape failure in one day, so it is a raise and not a note.
+    """
+    share = midrange_share(bed)
+    if share < MIN_MIDRANGE:
+        raise SystemExit(
+            f"{name}: only {share*100:.1f}% of this background's energy is between "
+            f"300 Hz and 4 kHz, so it cannot mask a voice.\n"
+            f"Real film soundtracks measure 48-90%. Fix the bed, not the floor.")
+    print(f"  [bed check] {name}: {share*100:.0f}% midrange, ok")
+
+
+def music_bed(n: int, seed: int = 7) -> np.ndarray:
+    """Something with the spectral shape of a score, not a rumble.
+
+    The previous version was pink noise through two one-pole lowpasses plus a
+    chord at 110/165/220 Hz, and it had almost nothing above 300 Hz. A bed has
+    to live where the voice lives or it is not a test. So: the chord keeps its
+    fundamentals and gains harmonics up through the speech band, and the noise
+    layer is shaped rather than buried.
     """
     rng = np.random.default_rng(seed)
-    white = rng.standard_normal(n)
-    # one-pole lowpass twice: rolls off like a music bed rather than hiss
-    b, a = [0.02], [1.0, -0.98]
     from scipy import signal as sg
-    pink = sg.lfilter(b, a, sg.lfilter(b, a, white))
+    white = rng.standard_normal(n)
+    # gentler roll-off, so the noise still has presence in the speech band
+    pink = sg.lfilter([0.3], [1.0, -0.7], white)
     t = np.arange(n) / SR
-    chord = sum(np.sin(2 * np.pi * f * t) for f in (110.0, 164.81, 220.0)) / 3.0
+
+    chord = np.zeros(n)
+    for f0 in (110.0, 164.81, 220.0):
+        for k, amp in enumerate((1.0, 0.7, 0.5, 0.35, 0.25, 0.18), start=1):
+            chord += amp * np.sin(2 * np.pi * f0 * k * t)
+    chord /= np.abs(chord).max() + 1e-9
+
+    # a repeating figure in the middle of the voice band, which is what actually
+    # competes with a consonant
+    fig = np.zeros(n)
+    for i, f0 in enumerate([523.25, 659.25, 783.99, 659.25]):
+        seg = slice(int(i * 0.5 * SR), min(n, int((i + 1) * 0.5 * SR)))
+        span = np.arange(seg.stop - seg.start) / SR
+        if span.size:
+            fig[seg] = np.sin(2 * np.pi * f0 * span) * np.exp(-span * 3)
+    fig = np.tile(fig[: int(2 * SR)], n // max(int(2 * SR), 1) + 1)[:n]
+
     swell = 0.6 + 0.4 * np.sin(2 * np.pi * 0.05 * t)
-    return (pink / (np.abs(pink).max() + 1e-9) * 0.6 + chord * 0.4) * swell
+    bed = (pink / (np.abs(pink).max() + 1e-9) * 0.45
+           + chord * 0.35 + fig * 0.35) * swell
+    return bed / (np.abs(bed).max() + 1e-9)
 
 
 def build_speech_track(key: str, tmp: Path, gap_s: float = 1.2) -> np.ndarray:
@@ -186,6 +244,7 @@ def main() -> int:
     speech = build_speech_track(deepgram_key(), tmp)
     n = len(speech)
     bed = music_bed(n)
+    check_masks_speech(bed, "music_bed")
 
     # Speech is pinned at -23 LUFS (the EBU R128 delivery target) and the bed
     # moves, so the recorded truth is one number per fixture.
