@@ -125,6 +125,26 @@ sounded identical; they did.
 energy between 300 Hz and 4 kHz. The old bed measures 4.3% and fails hard. Real
 public-domain films measure 48-90%.
 
+**On rock, which is what people actually put on.** Bruno, on the library music
+and netlabel tracks above: *"Those are not actual songs. Literally any song
+people listen to. Or make one rock style."* So I generated two, 30 seconds each
+via ElevenLabs Music (about 125 units a track out of 30,000 — the rate was
+checked, not guessed; Google's Lyria 3 is on the same box but its credits are
+depleted). A LibriVox reader mixed **5 LU under** each:
+
+| | instrumental rock, 141 bpm | the same, with a singer |
+|---|---|---|
+| measured ratio | −3.8 → **+11.6 LU** | −4.5 → **−2.6 LU** |
+| SI-SDR | −5.5 → **+7.5 dB** | −5.9 → **−0.6 dB** |
+| voice kept | −1.5 dB | −0.9 dB |
+| song removed | **−28.9 dB** | −10.5 dB |
+| leak into "vocals" | −53 dB | **−6 dB** |
+
+The second one is the limitation, not a bug: a vocal separator cannot tell a
+singer from a narrator, so the band comes out *with* the speech and there is
+nothing left to turn down. `will_it_help()` called both before the compute was
+spent — that is now three tracks it has ranked correctly in advance.
+
 **On real material, chosen by the tool rather than by me.**
 `tools/find_a_bad_one.py` walks public-domain films and ranks them by how buried
 the dialogue is. The worst it found was *Radio at War* (1944), narration sitting
