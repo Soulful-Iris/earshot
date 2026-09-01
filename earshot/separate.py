@@ -147,8 +147,14 @@ def split(path: str | Path, out_dir: str | Path,
         w = win[:len(chunk)]
         acc_v = voice * w[:, None]
         acc_w = w.copy()
-        acc_v[:len(carry_v)] += carry_v
-        acc_w[:len(carry_w)] += carry_w
+        # The carry can be LONGER than the final chunk when the file ends inside
+        # the overlap region, and it always is when the whole file is shorter
+        # than one window. Without the clamp this raised a broadcast error on
+        # any input under about four seconds -- which every probe in
+        # `will_it_help` is, so the predictor could not run at all.
+        k = min(len(carry_v), len(acc_v))
+        acc_v[:k] += carry_v[:k]
+        acc_w[:k] += carry_w[:k]
 
         emit = len(chunk) if final else hop
         weight = np.maximum(acc_w[:emit], 1e-9)[:, None]
@@ -259,3 +265,126 @@ def enhance(path: str | Path, out_path: str | Path | None = None,
         background_gain_db=gain_db,
         programme_lufs_before=programme_before,
         programme_lufs_after=_gated(out))
+
+
+# ---------------------------------------------------------------------------
+# Will separation help this programme at all? Ask before spending 4x realtime.
+# ---------------------------------------------------------------------------
+
+# How much of the background comes back labelled "vocals". Measured across five
+# CC-BY tracks on 2026-09-01, against what separation then actually achieved:
+#
+#   Funky Louie (has a singer)      -11.8 dB      -- unusable
+#   Warfare, Pain Of Life           -15.3 dB      -> SI-SDR gain +0.9 dB
+#   Perfect Lovely Modern Justice   -27.6 dB
+#   Rosevere, Here's the Thing      -55.0 dB      -> SI-SDR gain +17.0 dB
+#   Rosevere, Arcade Montage        -58.8 dB
+#
+# A vocal separator cannot remove music that sounds like a voice, and a
+# sustained melodic lead in the vocal range is, to it, a voice. Note the
+# trade-off this sets up: the same tracks that mask speech best (most midrange
+# energy) are the ones that leak most, so the hard cases are hard twice over.
+# HOW PRECISE THIS IS, measured rather than assumed. The same track probed at
+# different lengths:
+#
+#   probe length          1.0s    2.0s    4.0s   10.0s   24.0s
+#   Rosevere (clean)     -33.8   -44.7   -48.5   -47.1   -52.3
+#   Warfare  (leaky)      +0.0    -0.6   -15.3    -8.7    -7.5
+#
+# The number does NOT settle -- it moves up to 15 dB with probe length. What is
+# stable is the SEPARATION between the two: thirty-odd dB at every length past
+# a second. So this reports a class, not a measurement, and anyone quoting the
+# dB figure to one decimal place (as I did to Bruno before running this) is
+# claiming a precision it does not have.
+LEAK_GOOD = -35.0
+LEAK_POOR = -20.0
+PROBE_S = 20.0
+MIN_PROBE_S = 4.0        # under this the estimate is worthless, not merely noisy
+
+
+@dataclass
+class Prospect:
+    leak_db: float
+    background_seconds: float
+    verdict: str
+
+    def helpful(self) -> bool:
+        return self.leak_db <= LEAK_POOR
+
+
+def will_it_help(path: str | Path, work_dir: str | Path | None = None,
+                 probe_s: float = PROBE_S) -> Prospect | None:
+    """Separate only the parts with nobody talking, and see what comes back.
+
+    If the background alone is largely returned as "vocals", separation cannot
+    help: there will be nothing left to turn down, and the four times realtime
+    would be spent proving it. Returns None when the programme has no usable
+    background to probe -- somebody talking continuously -- which is not a
+    verdict either way.
+
+    This is the measurement half of the project deciding whether the separation
+    half is worth running, which is a better use of a meter than printing a
+    number at somebody.
+    """
+    import numpy as np
+
+    from . import vad
+    from .loudness import BlockLoudness, STEP_S
+    from .measure import GUARD_BLOCKS, SPEECH_BLOCK
+
+    src = Path(path)
+    work = Path(work_dir) if work_dir else src.parent / (src.stem + ".prospect")
+    work.mkdir(parents=True, exist_ok=True)
+    media = decode.probe(src)
+
+    windows = vad.speech_windows(media)
+    acc = BlockLoudness(media.channels)
+    for chunk in decode.stream(media):
+        acc.feed(chunk)
+    frac = vad.speech_fraction_per_block(windows, len(acc.blocks()))
+
+    near = frac > 0.0
+    for shift in range(1, GUARD_BLOCKS + 1):
+        near |= np.roll(frac > 0.0, shift)
+        near |= np.roll(frac > 0.0, -shift)
+    quiet = ~near
+    if quiet.sum() * STEP_S < MIN_PROBE_S:
+        # Continuous narration leaves nothing to probe: a 25 s excerpt of a
+        # LibriVox reader has 1.7 s of speech-free audio in it. That is a real
+        # limit of this approach and the honest answer is no answer.
+        return None
+
+    # Collect the speech-free stretches into one probe file. Concatenating
+    # across cuts is fine here: the question is what the model calls this
+    # material, not how it flows.
+    keep = np.flatnonzero(quiet)
+    want = int(probe_s / STEP_S)
+    keep = keep[:want] if len(keep) > want else keep
+    spans = np.split(keep, np.flatnonzero(np.diff(keep) > 1) + 1)
+
+    probe = work / "background.wav"
+    parts = [f"between(t,{s[0]*STEP_S:.3f},{(s[-1]+4)*STEP_S:.3f})"
+             for s in spans if len(s)]
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+         "-af", f"aselect='{'+'.join(parts)}',asetpts=N/SR/TB",
+         "-ac", "2", "-ar", str(MODEL_SR), "-c:a", "pcm_f32le", str(probe)],
+        check=True, timeout=900)
+
+    stems = split(probe, work)
+    before = decode.read_all(decode.probe(probe), sr=MODEL_SR, channels=1)[:, 0]
+    after = decode.read_all(decode.probe(stems.voice), sr=MODEL_SR, channels=1)[:, 0]
+
+    def db(x):
+        return 10.0 * float(np.log10(float(x @ x) / max(len(x), 1) + 1e-20))
+
+    leak = db(after) - db(before)
+    verdict = ("this background separates cleanly" if leak <= LEAK_GOOD else
+               "some of this background will come along with the voice"
+               if leak <= LEAK_POOR else
+               "this background sounds like a voice to the model; separation "
+               "will not help much")
+    # Rounded on purpose. See the table above: the tenths are not real.
+    leak = round(leak)
+    return Prospect(leak_db=leak, background_seconds=len(before) / MODEL_SR,
+                    verdict=verdict)
