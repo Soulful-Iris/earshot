@@ -141,11 +141,18 @@ a volume knob with a good name.
 and 1.3 GB peak, which is why separation streams in overlapping windows rather
 than loading the programme.
 
-**Separation is deliberately not on the web page.** Four times realtime on two
-shared cores means one thirty-minute upload is two hours of CPU on a box that
-also answers a doorbell; an open endpoint for it is a way to be taken down by
-one polite visitor. Measurement is public because it is seconds. Separation is
-the command line.
+**Superseded — separation IS on the web page now**, at the top of this file.
+What follows was true and is kept because it is why the page is shaped the way
+it is: the objection was never separation, it was an *unbounded* queue of it.
+Six-minute cap, one job at a time, a memory cap on the worker and a sweep answer
+it; a thirty-minute upload with no queue would still be a way to be taken down
+by one polite visitor.
+
+> Separation is deliberately not on the web page. Four times realtime on two
+> shared cores means one thirty-minute upload is two hours of CPU on a box that
+> also answers a doorbell; an open endpoint for it is a way to be taken down by
+> one polite visitor. Measurement is public because it is seconds. Separation is
+> the command line.
 
 **Corrected, and it changes what the table above means.** The synthetic bed
 those fixtures used put **92.4% of its energy below 300 Hz** and 1.6% in the
