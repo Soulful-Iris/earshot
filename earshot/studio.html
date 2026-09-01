@@ -11,31 +11,40 @@
  h2{font-size:1rem;margin:2.2rem 0 .7rem;color:#9aa0a6;font-weight:600;
     text-transform:uppercase;letter-spacing:.06em}
  .sub{color:#9aa0a6;margin:0 0 1.8rem}
- .drop{border:1.5px dashed #2f3540;border-radius:.7rem;padding:1.6rem 1rem;text-align:center;
-       background:#12151a;cursor:pointer;transition:border-color .15s,background .15s}
+ /* display:block is not decoration. A <label> is INLINE by default, so with a
+    border and padding but no display it renders as fragments across three line
+    boxes, the text spills past the right edge and the button lands on top of
+    it. That is what he meant by "ui is messed up", and I could not see it
+    because I had never rendered one of my own pages. */
+ .drop{display:block;border:1.5px dashed #2f3540;border-radius:.7rem;
+       padding:1.5rem 1rem;text-align:center;background:#12151a;cursor:pointer;
+       transition:border-color .15s,background .15s;overflow-wrap:anywhere}
  .drop:hover,.drop.over{border-color:#c8a24a;background:#171b21}
  .drop b{color:#e7e3dc}
  .drop span{color:#7d848c;font-size:.9rem}
  #file{display:none}
- .parts{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.5rem;margin:.2rem 0}
- label.part{display:flex;gap:.6rem;align-items:flex-start;background:#14171c;
-            border:1px solid #23272e;border-radius:.5rem;padding:.6rem .7rem;cursor:pointer}
- label.part:has(input:checked){border-color:#c8a24a;background:#1a1a15}
- label.part input{margin:.25rem 0 0}
- label.part .n{font-weight:600}
- label.part .d{color:#7d848c;font-size:.85rem;display:block}
- button{background:#c8a24a;color:#15120a;border:0;border-radius:.5rem;
-        padding:.75rem 1.3rem;font:600 1rem inherit;cursor:pointer;margin-top:1.1rem}
+ button{display:block;width:100%;background:#c8a24a;color:#15120a;border:0;
+        border-radius:.5rem;padding:.85rem 1.3rem;font:600 1rem inherit;
+        cursor:pointer;margin-top:1.1rem}
  button[disabled]{opacity:.45;cursor:default}
  .bar{height:.5rem;background:#1c2027;border-radius:1rem;overflow:hidden;margin:.7rem 0 .4rem}
  .bar i{display:block;height:100%;background:#c8a24a;width:0;transition:width .4s}
+ .verdict{font-size:1.25rem;font-weight:600;margin:1.8rem 0 .2rem;
+          letter-spacing:-.01em;line-height:1.3}
  .note{color:#9aa0a6;font-size:.92rem}
  .err{color:#e0806f}
- table{width:100%;border-collapse:collapse;margin-top:.6rem}
- td{padding:.5rem .3rem;border-bottom:1px solid #1e222a;vertical-align:middle}
- td.lv{color:#7d848c;font:13px ui-monospace,monospace;text-align:right;white-space:nowrap}
- .absent{color:#7d848c}
- a.dl{color:#c8a24a;text-decoration:none;font-weight:600}
+ /* Stacked blocks, not a table. A player, a level and a download link across
+    three columns is about 520px of content on a 390px phone, and the audio
+    element is the one that loses. */
+ .stem{border-top:1px solid #1e222a;padding:.85rem 0}
+ .stem:last-child{border-bottom:1px solid #1e222a}
+ .stem .top{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+ .stem .n{font-weight:600;font-size:1.05rem}
+ .stem .lv{color:#7d848c;font:12.5px ui-monospace,monospace;margin-left:auto}
+ .stem .d{color:#7d848c;font-size:.85rem}
+ .stem.gone .n{color:#7d848c;font-weight:500}
+ a.dl{display:inline-block;color:#c8a24a;text-decoration:none;font-weight:600;
+      padding:.45rem 0;font-size:.95rem}
  .why{color:#9aa0a6;font-size:.92rem;margin-top:2.4rem;border-top:1px solid #23272e;padding-top:1.2rem}
  .why b{color:#e7e3dc}
  a{color:#c8a24a}
@@ -47,8 +56,8 @@
 
 <label class=drop id=drop for=file>
   <b id=dropname>Choose an mp3</b><br>
-  <span>or drop one here &mdash; under __MAX_MB__ MB, under __MAX_MIN__ minutes</span>
-  <input id=file type=file accept="audio/*">
+  <span>or drop one here &mdash; any audio or video, under __MAX_MB__ MB and __MAX_MIN__ minutes</span>
+  <input id=file type=file>
 </label>
 
 <button id=go disabled>Pull it apart</button>
@@ -62,8 +71,8 @@ comes back below.</p>
 </div>
 
 <div id=result hidden>
-  <h2 id=verdict></h2>
-  <table id=stems></table>
+  <p class=verdict id=verdict></p>
+  <div id=stems></div>
   <p class=note id=foot></p>
 </div>
 
@@ -152,17 +161,18 @@ async function poll() {
                      : n === 'vocals' ? 'voice' : n;
     const rows = order.filter(n => d.found && d.found[n]).map(n => {
       const f = d.found[n];
-      const gone = f.status === 'absent';
-      const faint = f.status === 'faint';
-      const lvl = f.db === null || f.db === undefined ? 'silent' : f.db + ' dB';
-      if (gone) return `<tr><td class=absent>${label(n)}
-        <span class=d>&mdash; not in this recording</span></td>
-        <td class=lv>${lvl}</td><td></td></tr>`;
-      return `<tr><td><span class=n>${label(n)}</span>${faint
-          ? ' <span class=d>&mdash; only just there</span>' : ''}
-        <audio controls preload=none src="/jobs/${jobId}/${f.file}"></audio></td>
-        <td class=lv>${lvl}</td>
-        <td><a class=dl href="/jobs/${jobId}/${f.file}" download>download</a></td></tr>`;
+      const lvl = (f.db === null || f.db === undefined) ? 'silent' : f.db + ' dB';
+      if (f.status === 'absent') return `<div class="stem gone">
+        <div class=top><span class=n>${label(n)}</span>
+        <span class=lv>${lvl}</span></div>
+        <div class=d>not in this recording</div></div>`;
+      return `<div class=stem>
+        <div class=top><span class=n>${label(n)}</span>
+        <span class=lv>${lvl}</span></div>
+        ${f.status === 'faint' ? '<div class=d>only just there</div>' : ''}
+        <audio controls preload=metadata src="/jobs/${jobId}/${f.file}"></audio>
+        <a class=dl href="/jobs/${jobId}/${f.file}" download>Download ${label(n)}</a>
+        </div>`;
     });
     $('#stems').innerHTML = rows.join('');
     $('#foot').textContent = `took ${Math.round(d.elapsed)}s. files go in __KEEP__ hours.`;
