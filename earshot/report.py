@@ -25,7 +25,7 @@ def strip(report: Report, width: int = 56) -> str:
     for m in report.worst:
         i = min(width - 1, int(m.at / max(report.duration, 1e-9) * width))
         if m.sbr_lu is None:
-            cells[i] = "█"
+            cells[i] = "█"        # only "too close" reaches the worst list
         else:
             level = max(0, min(7, int((CLEAR_LU - m.sbr_lu) / CLEAR_LU * 7)))
             cells[i] = BAR[level]
@@ -83,7 +83,8 @@ def lines(report: Report) -> list[str]:
         out.append("  Hardest moments:")
         for m in report.worst:
             if m.sbr_lu is None:
-                out.append(f"    {m.clock():>8}   voice not above the background at all")
+                out.append(f"    {m.clock():>8}   voice and background within a "
+                           f"decibel; cannot be separated")
             else:
                 out.append(f"    {m.clock():>8}   {m.sbr_lu:+5.1f} LU")
         s = strip(report)

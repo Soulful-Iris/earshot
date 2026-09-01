@@ -92,6 +92,13 @@ class Moment:
     sbr_lu: float | None
     speech_lufs: float
     background_lufs: float
+    # Why there is no number, when there is no number. These are opposite
+    # states and collapsing them was a real bug: a dry audiobook reported
+    # "the voice is not above the background at all" at three timestamps,
+    # which is the reverse of the truth. There was nothing under the voice.
+    #   "silent"    nothing measurable under the speech. The best case there is.
+    #   "too close" the two levels are within a decibel and cannot be separated.
+    reason: str | None = None
 
     def clock(self) -> str:
         m, s = divmod(int(self.at), 60)
@@ -176,7 +183,8 @@ def sensitivity(speech_lufs: float, background_lufs: float) -> float | None:
 
 
 def analyse(path: str | Path, window_s: float = 3.0,
-            worst_n: int = 5, keep_blocks: bool = False) -> Report:
+            worst_n: int = 5, keep_blocks: bool = False,
+            name: str | None = None) -> Report:
     media = decode.probe(path)
 
     windows = vad.speech_windows(media)
@@ -233,9 +241,14 @@ def analyse(path: str | Path, window_s: float = 3.0,
     finite = sorted(m.sbr_lu for m in track if m.sbr_lu is not None)
     sbr_range = ((float(np.percentile(finite, 25)), float(np.percentile(finite, 75)))
                  if len(finite) >= 8 else None)
-    if track and len(finite) < len(track) * 0.5:
-        notes.append(f"for {len(track) - len(finite)} of {len(track)} moments the "
-                     "voice was not far enough above the bed to put a number on")
+    unmeasured = [m for m in track if m.reason == "too close"]
+    silent = [m for m in track if m.reason == "silent"]
+    if track and len(unmeasured) > len(track) * 0.2:
+        notes.append(f"for {len(unmeasured)} of {len(track)} moments the voice "
+                     "was not far enough above the bed to put a number on")
+    if track and len(silent) > len(track) * 0.2:
+        notes.append(f"for {len(silent)} of {len(track)} moments there was "
+                     "nothing measurable under the voice at all")
 
     lufs = block_lufs(z)
 
@@ -256,7 +269,7 @@ def analyse(path: str | Path, window_s: float = 3.0,
     worst = _pick_worst(track, window_s, worst_n)
 
     return Report(
-        path=str(media.path),
+        path=name or str(media.path),
         duration=media.duration,
         programme_lufs=_finite(programme) or float("nan"),
         speech_lufs=_finite(speech) or float("nan"),
@@ -333,10 +346,12 @@ def _local_track(z: np.ndarray, speech_mask: np.ndarray, bg_mask: np.ndarray,
         # saying, and it is not a number.
         if b <= ABSOLUTE_GATE:
             out.append(Moment(at=i * STEP_S, sbr_lu=None, speech_lufs=s,
-                              background_lufs=b))
+                              background_lufs=b, reason="silent"))
             continue
-        out.append(Moment(at=i * STEP_S, sbr_lu=sbr_from(s, b),
-                          speech_lufs=s, background_lufs=b))
+        ratio = sbr_from(s, b)
+        out.append(Moment(at=i * STEP_S, sbr_lu=ratio, speech_lufs=s,
+                          background_lufs=b,
+                          reason=None if ratio is not None else "too close"))
     return out
 
 
@@ -346,8 +361,12 @@ def _pick_worst(track: list[Moment], window_s: float, worst_n: int) -> list[Mome
     A None ratio -- the voice not measurably above the bed at all -- sorts worse
     than any number, because it is worse.
     """
-    ranked = sorted(track, key=lambda m: (m.sbr_lu is not None,
-                                          m.sbr_lu if m.sbr_lu is not None else 0.0))
+    # "silent" moments are not hard moments -- they are the easiest audio in
+    # the programme -- so they are not candidates at all. Only "too close" ranks
+    # below every number.
+    candidates = [m for m in track if m.reason != "silent"]
+    ranked = sorted(candidates, key=lambda m: (m.sbr_lu is not None,
+                                               m.sbr_lu if m.sbr_lu is not None else 0.0))
     kept: list[Moment] = []
     for m in ranked:
         # Spaced out, or all five land inside one bad scene and the report
