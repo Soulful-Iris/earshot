@@ -68,23 +68,66 @@ Three numbers come out:
 
 Plus the timestamps of the hardest moments, so you can go and check.
 
-## What the fix does, and what it cannot
+## Fixing it: two different things
 
-`--fix` writes a re-balanced copy: it lifts quiet dialogue toward a consistent
-level and pulls loud non-speech material down toward it, on a 100 ms grid,
-smoothed fast-down and slow-up so it does not pump. It is night mode done with a
-speech detector instead of a broadband compressor — it knows which parts are the
-talking, so it leaves those alone and squashes what is around them.
+### `--enhance` — separate the voice out, then set the ratio
 
-**It cannot turn the music down under the voice.** They are one signal by the
-time anyone outside the mix suite hears them; separating them needs a
-source-separation model and a much bigger machine. So `swing` and `spread`
-improve and `ratio` does not, and the tool says so in its own output rather than
-letting you assume otherwise.
+This is the one that changes the number. It pulls the voice away from
+everything else with a source-separation model, then puts the background back
+at a distance you choose:
 
-Measured on a two-minute human reading under a bed at +4 LU: spread 7.9 → 3.7,
-and a speech recogniser's word error rate against the clean stem went **0.117 →
-0.004**.
+```
+earshot episode.mkv --enhance --to 12     # voice 12 LU above everything else
+earshot episode.mkv --voice-only          # just the voice, nothing under it
+```
+
+`--to` is the whole point. All the measurement above produces a **verdict** —
+here is how buried your dialogue is, sorry. Separation turns it into a **dial**.
+
+Measured against the ground-truth stems, on 20-second excerpts:
+
+| | SI-SDR of the mix | after separation | gain |
+|---|---|---|---|
+| voice level with bed (wide, +0 LU) | −1.28 | **+14.82** | +16.10 |
+| wide, +4 LU | 1.94 | **+16.34** | +14.39 |
+| wide, +10 LU | 8.58 | **+20.32** | +11.75 |
+| human reading, +4 LU | 0.93 | **+10.41** | +9.47 |
+| held-out voice and bed, +6.5 LU | 7.41 | **+16.65** | +9.24 |
+
+**Mean gain +12.2 dB.** The voice survives at its original level (−24.7 dB
+against −24.4 in the mix) while the background drops 17 to 33 dB — which is the
+shape of a separation rather than of deleting everything, and the reason both
+columns are printed.
+
+For comparison, every filter ffmpeg already ships scores **+0.01 dB** on the
+same test. `dialoguenhance` raises the voice by 9 dB and the bed by 9 dB; it is
+a volume knob with a good name.
+
+**Cost, measured on this machine** (2 cores, no GPU, 1.8 GB): about 4× realtime
+and 1.3 GB peak, which is why separation streams in overlapping windows rather
+than loading the programme.
+
+### `--fix` — level only, no separation
+
+Lifts quiet dialogue toward a consistent level and pulls loud non-speech
+material down toward it, on a 100 ms grid, smoothed fast-down and slow-up so it
+does not pump. Night mode done with a speech detector instead of a broadband
+compressor. It improves `swing` and `spread` and **cannot** move `ratio`,
+because it never separates anything. On a two-minute human reading under a bed
+at +4 LU: spread 7.9 → 3.7, and a recogniser's word error rate against the
+clean stem went **0.117 → 0.004**.
+
+> **Superseded, and kept because being wrong about it was the interesting part.**
+> This section used to read: *"It cannot turn the music down under the voice.
+> They are one signal by the time anyone outside the mix suite hears them;
+> separating them needs a source-separation model and a much bigger machine."*
+>
+> That was written without checking anything. Bruno read it and said he would
+> have found it more impressive if the thing could actually remove the
+> background and enhance the voice. Finding out took under an hour: the torch
+> aarch64 wheel is 408 MB, demucs 4.0.1 installs, and separation runs on this
+> box. A constraint I had asserted rather than measured was doing real work in a
+> public document, which is exactly the failure the rest of this README is about.
 
 ---
 

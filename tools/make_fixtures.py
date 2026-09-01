@@ -100,10 +100,41 @@ def read_mono(path: Path) -> np.ndarray:
 
 def write_wav(path: Path, mono: np.ndarray) -> None:
     stereo = np.repeat(mono[:, None], 2, axis=1).astype(np.float32)
+    write_stereo(path, stereo)
+
+
+def write_stereo(path: Path, stereo: np.ndarray) -> None:
     subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "f32le", "-ar", str(SR),
          "-ac", "2", "-i", "-", "-c:a", "pcm_f32le", str(path)],
-        input=stereo.tobytes(), check=True, timeout=300)
+        input=np.ascontiguousarray(stereo, dtype=np.float32).tobytes(),
+        check=True, timeout=300)
+
+
+def widen(mono: np.ndarray, seed: int) -> np.ndarray:
+    """Spread a signal across the stereo field the way a score is spread.
+
+    Every other fixture in this file is one mono signal copied into both
+    channels, which means the voice and the bed are equally centred and NOTHING
+    that works on stereo position has anything to work with. That is not how a
+    film is mixed: dialogue is anchored in the centre and the music is wide, and
+    a centre-extraction filter exists precisely to exploit the difference.
+
+    Measured consequence of not having this: ffmpeg's `dialoguenhance` scored
+    +0.01 dB on the mono-in-stereo fixtures and I was about to write down that
+    it does nothing. It had nothing to do.
+
+    Decorrelated by short, different delays and opposed comb filtering per
+    channel -- crude next to a real mix, and enough to make left and right
+    genuinely different signals.
+    """
+    rng = np.random.default_rng(seed)
+    out = np.empty((len(mono), 2))
+    for ch in range(2):
+        d = int(rng.integers(120, 480))                  # 2.5-10 ms
+        delayed = np.concatenate([np.zeros(d), mono])[:len(mono)]
+        out[:, ch] = 0.7 * mono + 0.5 * (delayed if ch == 0 else -delayed)
+    return out / max(np.abs(out).max(), 1e-9) * np.abs(mono).max()
 
 
 def at_lufs(mono: np.ndarray, target: float) -> np.ndarray:
@@ -262,6 +293,28 @@ def main() -> int:
              "voice_stem": f"stems/{name[:-4]}.voice.wav",
              "bed_stem": f"stems/{name[:-4]}.bed.wav"})
         print(f"  {name}  different voice, broadband bed, gap {gap:+.1f} LU")
+
+    # STEREO, the way a film is actually mixed: voice anchored centre, bed wide.
+    # Without these the corpus cannot tell a separator from a volume knob.
+    print("\n  stereo (centred voice, wide bed):")
+    for gap in (10, 4, 0):
+        v = at_lufs(speech, -23.0)
+        b = at_lufs(bed, -23.0 - gap)
+        vs = np.repeat(v[:, None], 2, axis=1)             # dead centre
+        bs = widen(b, seed=41 + gap)                      # spread
+        mixed = vs + bs
+        peak = float(np.abs(mixed).max())
+        trim = 0.99 / peak if peak > 0.99 else 1.0
+        name = f"wide_gap{gap:+03d}.wav"
+        write_stereo(out / name, mixed * trim)
+        write_stereo(stems / f"{name[:-4]}.voice.wav", vs * trim)
+        write_stereo(stems / f"{name[:-4]}.bed.wav", bs * trim)
+        manifest["cases"].append(
+            {"file": name, "speech_minus_bed_lu": gap, "bed_lufs": -23.0 - gap,
+             "stereo": "centred voice, wide bed",
+             "voice_stem": f"stems/{name[:-4]}.voice.wav",
+             "bed_stem": f"stems/{name[:-4]}.bed.wav"})
+        print(f"  {name}  voice centre, bed wide, gap {gap:+d} LU")
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"\nwrote {out}/manifest.json")
