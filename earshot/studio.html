@@ -49,6 +49,11 @@
  .why b{color:#e7e3dc}
  a{color:#c8a24a}
  audio{width:100%;margin-top:.35rem}
+ .saved a{display:block;border-top:1px solid #1e222a;padding:.7rem .1rem;
+          color:#e7e3dc;text-decoration:none}
+ .saved a:last-child{border-bottom:1px solid #1e222a}
+ .saved .nm{font-weight:600}
+ .saved .k{color:#7d848c;font-size:.85rem;display:block}
 </style>
 <main>
 <h1>earshot</h1>
@@ -68,6 +73,11 @@ comes back below.</p>
 <div id=running hidden>
   <div class=bar><i id=fill></i></div>
   <div class=note id=progress></div>
+</div>
+
+<div id=saved hidden>
+  <h2>Your projects</h2>
+  <div id=savedlist></div>
 </div>
 
 <div id=result hidden>
@@ -94,12 +104,58 @@ piano stem from a song with no piano is a real output and a useless one.</p>
 const $ = s => document.querySelector(s);
 let picked = null, jobId = null;
 
+// The job id lives in the URL. That is the whole of "come in and out of the
+// app": close the tab, lock the phone, open the link tomorrow, and the page
+// picks the job back up instead of showing a blank form. Before this, jobId
+// was a variable in memory and a reload threw a finished job away.
+function remember(id, name) {
+  location.hash = id;
+  try {
+    const seen = JSON.parse(localStorage.getItem('earshot') || '[]')
+      .filter(j => j.id !== id);
+    seen.unshift({id, name: name || '', at: Date.now()});
+    localStorage.setItem('earshot', JSON.stringify(seen.slice(0, 20)));
+  } catch (e) {}
+}
+
+async function showSaved() {
+  let mine = [];
+  try { mine = JSON.parse(localStorage.getItem('earshot') || '[]'); } catch (e) {}
+  let server = [];
+  try { server = (await (await fetch('/recent')).json()).jobs || []; } catch (e) {}
+  const byId = new Map(server.map(j => [j.id, j]));
+  const rows = mine.filter(m => byId.has(m.id)).map(m => {
+    const j = byId.get(m.id);
+    return `<a href="#${j.id}"><span class=nm>${j.name}</span>
+      <span class=k>${j.kind}</span></a>`;
+  });
+  if (!rows.length) return;
+  $('#savedlist').className = 'saved';
+  $('#savedlist').innerHTML = rows.join('');
+  $('#saved').hidden = false;
+}
+
+window.addEventListener('hashchange', () => {
+  const id = location.hash.slice(1);
+  if (id && id !== jobId) { jobId = id; $('#running').hidden = false;
+    $('#progress').textContent = 'picking that back up…'; poll(); }
+});
+
 $('#file').addEventListener('change', e => setFile(e.target.files[0]));
 ['dragover','dragenter'].forEach(t => $('#drop').addEventListener(t, e => {
   e.preventDefault(); $('#drop').classList.add('over'); }));
 ['dragleave','drop'].forEach(t => $('#drop').addEventListener(t, e => {
   e.preventDefault(); $('#drop').classList.remove('over'); }));
 $('#drop').addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
+
+// Resume whatever the URL points at, before anything else happens.
+if (location.hash.length > 1) {
+  jobId = location.hash.slice(1);
+  $('#running').hidden = false;
+  $('#progress').textContent = 'picking that back up…';
+  poll();
+}
+showSaved();
 
 function setFile(f) {
   if (!f) return;
@@ -130,6 +186,7 @@ $('#go').onclick = async () => {
   } catch (e) { return fail('that upload did not go through: ' + e); }
   if (!d.ok) return fail(d.why || 'that did not work');
   jobId = d.id;
+  remember(jobId, picked.name);
   poll();
 };
 
@@ -175,10 +232,19 @@ async function poll() {
         </div>`;
     });
     $('#stems').innerHTML = rows.join('');
-    $('#foot').textContent = `took ${Math.round(d.elapsed)}s. files go in __KEEP__ hours.`;
+    $('#foot').textContent =
+      `took ${Math.round(d.elapsed)}s. kept in S3 — this link keeps working: `
+      + location.origin + '/#' + jobId;
+    remember(jobId, (d.found && Object.keys(d.found).length) ? undefined : undefined);
+    showSaved();
     return;
   } else if (d.state === 'failed') {
     return fail(d.why || 'the job failed');
+  } else if (d.state === 'unknown') {
+    // A job id that no longer exists. This used to fall through to the retry
+    // at the bottom and poll a 404 forever behind whatever progress text was
+    // last on screen, which looks exactly like a job that is being slow.
+    return fail('that project is gone — the id is not on the server any more.');
   }
   setTimeout(poll, 2500);
 }

@@ -186,6 +186,9 @@ def sweep(now: float | None = None) -> int:
         except json.JSONDecodeError:
             created = d.stat().st_mtime
         if now - created > KEEP_HOURS * 3600:
+            # Local only. The S3 copy is the point of having one, and the
+            # download route pulls it back on demand -- so sweeping here frees
+            # the disk without breaking a link he was emailed yesterday.
             shutil.rmtree(d, ignore_errors=True)
             gone += 1
     return gone
@@ -212,3 +215,123 @@ def describe(job: Job) -> dict:
     elif st.get("state") in (None, "queued"):
         st["ahead"] = position(job.id)
     return st
+
+
+# ---------------------------------------------------------------------------
+# Keeping the work. Bruno: "I should be able to come in and out of the app.
+# Rhere should be a saved project in s3 linked in that site"
+# ---------------------------------------------------------------------------
+
+BUCKET = "soulful-iris-652539275920"
+PREFIX = "earshot"
+MAIL_TO = "brunodiaz@me.com"
+MAIL_FROM = "iris@soulful-ai.dev"
+SITE = "https://earshot.soulful-ai.dev"
+
+
+def s3_key(jid: str, filename: str) -> str:
+    return f"{PREFIX}/{jid}/{filename}"
+
+
+def put_s3(jid: str, path: Path) -> bool:
+    """Copy one finished stem to S3. Private; nothing here is world-readable.
+
+    These are somebody's own music pulled apart. The bucket blocks public
+    access and the only way to a file is through this site, which is a
+    deliberate choice and not an oversight.
+    """
+    r = subprocess.run(
+        ["aws", "s3", "cp", str(path), f"s3://{BUCKET}/{s3_key(jid, path.name)}",
+         "--quiet"], capture_output=True, text=True, timeout=900)
+    return r.returncode == 0
+
+
+def fetch_s3(jid: str, filename: str, into: Path) -> Path | None:
+    """Bring a stem back from S3 when the local copy has been swept.
+
+    This is what makes a link in an email still work tomorrow. Presigned URLs
+    would have been simpler and wrong: they are signed with the instance role's
+    temporary credentials and stop working when those rotate, so an emailed
+    link would quietly die in a few hours. A stable path on this site that
+    fetches from S3 on demand does not have that problem.
+    """
+    into.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(
+        ["aws", "s3", "cp", f"s3://{BUCKET}/{s3_key(jid, filename)}", str(into),
+         "--quiet"], capture_output=True, text=True, timeout=900)
+    return into if r.returncode == 0 and into.exists() else None
+
+
+def in_s3(jid: str) -> dict:
+    """What this job still has in S3, by filename."""
+    r = subprocess.run(
+        ["aws", "s3api", "list-objects-v2", "--bucket", BUCKET,
+         "--prefix", f"{PREFIX}/{jid}/", "--query", "Contents[].{k:Key,s:Size}",
+         "--output", "json"], capture_output=True, text=True, timeout=120)
+    if r.returncode != 0 or not r.stdout.strip() or r.stdout.strip() == "null":
+        return {}
+    try:
+        return {Path(o["k"]).name: o["s"] for o in json.loads(r.stdout) or []}
+    except (json.JSONDecodeError, TypeError, KeyError):
+        return {}
+
+
+def email_done(jid: str, spec: dict, status: dict) -> bool:
+    """Tell him it is finished, with links that will still work tomorrow.
+
+    Sent once, by the worker, at the moment the job completes -- because the
+    whole point is that he does not have to be looking at the page. The links
+    go to this site rather than to S3 directly, so they do not expire.
+    """
+    verdict = (status.get("verdict") or {}).get("kind", "")
+    levels = status.get("levels") or {}
+    name = spec.get("filename", "your file")
+    order = ["vocals", "band", "drums", "bass", "guitar", "piano", "other"]
+    lines = []
+    for part in order:
+        f = (status.get("parts") or {}).get(part)
+        if not f:
+            continue
+        db = levels.get(part)
+        gone = db is None or db < -30.0
+        label = "voice" if part == "vocals" else part
+        lines.append(f"  {label:<8} {'not in this recording' if gone else SITE + '/jobs/' + jid + '/' + f}")
+
+    body = (f"{name}\n{verdict}\n\n"
+            + "\n".join(lines)
+            + f"\n\nAll of it, and the players: {SITE}/#{jid}\n"
+            "Kept in S3, so these links keep working.\n")
+    r = subprocess.run(
+        ["aws", "ses", "send-email", "--region", "us-east-1",
+         "--from", MAIL_FROM, "--destination", f"ToAddresses={MAIL_TO}",
+         "--message", json.dumps({
+             "Subject": {"Data": f"earshot: {name}"},
+             "Body": {"Text": {"Data": body}}})],
+        capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        print(f"job {jid}: email FAILED: {r.stderr.strip()[:200]}", flush=True)
+    return r.returncode == 0
+
+
+def recent(limit: int = 12) -> list[dict]:
+    """Finished jobs, newest first, for the list on the page."""
+    out = []
+    if not JOBS.exists():
+        return out
+    for d in sorted(JOBS.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        spec_f, st_f = d / "job.json", d / "status.json"
+        if not (spec_f.is_file() and st_f.is_file()):
+            continue
+        try:
+            spec = json.loads(spec_f.read_text())
+            st = json.loads(st_f.read_text())
+        except json.JSONDecodeError:
+            continue
+        if st.get("state") != "done":
+            continue
+        out.append({"id": d.name, "name": spec.get("filename", "(unnamed)"),
+                    "kind": (st.get("verdict") or {}).get("kind", ""),
+                    "created": spec.get("created", 0)})
+        if len(out) >= limit:
+            break
+    return out

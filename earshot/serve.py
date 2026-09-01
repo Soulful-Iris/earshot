@@ -248,6 +248,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send(200, self._studio_page(), "text/html; charset=utf-8")
             return
+        if self.path == "/recent":
+            self._json(200, {"jobs": studio.recent()})
+            return
         if self.path == "/parts":
             from . import separate
             names = separate.available(separate.SIX)
@@ -276,8 +279,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             f = d / "out" / wanted
             if not f.is_file():
-                self._send(404, b"no", "text/plain")
-                return
+                # Swept locally, but the job was kept in S3. This is what makes
+                # a link in an email still work tomorrow, and it is why the
+                # email points at this site rather than at a presigned URL.
+                if studio.fetch_s3(jid, wanted, f) is None:
+                    self._send(404, b"no", "text/plain")
+                    return
             body = f.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "audio/mpeg")

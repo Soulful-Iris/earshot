@@ -78,20 +78,39 @@ def main(argv: list[str] | None = None) -> int:
             model_name=model_name,
             on_progress=progress)
 
+        # The model is finished with. Drop it before doing anything else: it is
+        # about 1.3 GB resident and every megabyte held here is a megabyte the
+        # measuring cannot have.
+        import gc
+        separate._models.clear()
+        gc.collect()
+
         # Measure each stem against the mix BEFORE encoding, so the numbers
         # describe the separation and not the mp3 encoder.
-        import numpy as np
-        from .loudness import lufs_of
+        #
+        # STREAMED, and that is the whole point of this block. The first version
+        # read each whole file into memory with read_all, doubled it with
+        # np.repeat to make it stereo, and filtered it in float64 -- roughly
+        # 300 MB of transient for a three-minute song, in a process still
+        # holding the model. It worked on every 30-second fixture I had and was
+        # killed by the memory cap at 203.8 of 203.8 seconds on the first real
+        # song anybody uploaded: separation complete, all seven stems on disk,
+        # and the job reported as failed two seconds from the end.
+        #
+        # split() streams for exactly this reason. Writing a post-step that did
+        # not is the same bug the streaming was built to prevent, one function
+        # further down.
+        import math
 
-        def rel(path):
-            x = decode.read_all(decode.probe(path), channels=1)[:, 0]
-            v = lufs_of(np.repeat(x[:, None], 2, axis=1))
-            return None if not np.isfinite(v) else round(v - mix_lufs, 1)
+        def gated(path) -> float:
+            return separate._gated(path)
 
-        mix_x = decode.read_all(media, channels=1)[:, 0]
-        mix_lufs = lufs_of(np.repeat(mix_x[:, None], 2, axis=1))
-        levels = {n: rel(p) for n, p in (stems.parts or {}).items()}
-        del mix_x
+        mix_lufs = gated(source)
+        levels = {}
+        for name, path in (stems.parts or {}).items():
+            v = gated(path)
+            levels[name] = None if not math.isfinite(v) else round(v - mix_lufs, 1)
+            gc.collect()
 
         made = {}
         for name, path in (stems.parts or {}).items():
@@ -107,9 +126,34 @@ def main(argv: list[str] | None = None) -> int:
             path.unlink(missing_ok=True)
             made[name] = mp3.name
 
+        verdict = separate.classify(levels)
         write_status(job, state="done", parts=made, levels=levels,
-                     verdict=separate.classify(levels),
-                     elapsed=round(time.time() - started, 1))
+                     verdict=verdict, elapsed=round(time.time() - started, 1))
+
+        # Everything past this point is delivery, and NONE of it may turn a
+        # finished job back into a failed one. The stems exist and the status
+        # already says done; if S3 or SES is having a bad day that is worth
+        # recording and not worth losing the work over. This is the exact shape
+        # that ate the first real song anybody uploaded -- separation complete,
+        # then killed in the step afterwards, reported as a failure.
+        from . import studio
+        try:
+            kept = [n for n, f in made.items()
+                    if studio.put_s3(job.name, job / "out" / f)]
+            write_status(job, kept=sorted(kept))
+            print(f"job {job.name}: {len(kept)}/{len(made)} stems in S3", flush=True)
+        except Exception as e:                               # noqa: BLE001
+            write_status(job, kept=[], keep_error=str(e)[:200])
+            print(f"job {job.name}: S3 upload failed: {e}", flush=True)
+
+        try:
+            st = json.loads((job / "status.json").read_text())
+            if studio.email_done(job.name, spec, st):
+                write_status(job, emailed=True)
+                print(f"job {job.name}: emailed", flush=True)
+        except Exception as e:                               # noqa: BLE001
+            print(f"job {job.name}: email failed: {e}", flush=True)
+
         return 0
 
     except Exception as e:                                   # noqa: BLE001
