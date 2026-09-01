@@ -107,6 +107,19 @@ a volume knob with a good name.
 and 1.3 GB peak, which is why separation streams in overlapping windows rather
 than loading the programme.
 
+**Separation is deliberately not on the web page.** Four times realtime on two
+shared cores means one thirty-minute upload is two hours of CPU on a box that
+also answers a doorbell; an open endpoint for it is a way to be taken down by
+one polite visitor. Measurement is public because it is seconds. Separation is
+the command line.
+
+**What I still cannot tell you.** A speech recogniser scored the before and the
+after identically -- 0.024 word error rate either way -- not because separation
+did nothing but because Nova-3 already understood the buried version, and reads
+speech five LU *under* a bed with no errors at all. The ceiling is the
+instrument. Every number above is against ground-truth stems, and whether it
+*sounds* better is a judgement no tool here can make.
+
 ### `--fix` — level only, no separation
 
 Lifts quiet dialogue toward a consistent level and pulls loud non-speech
