@@ -388,3 +388,61 @@ def will_it_help(path: str | Path, work_dir: str | Path | None = None,
     leak = round(leak)
     return Prospect(leak_db=leak, background_seconds=len(before) / MODEL_SR,
                     verdict=verdict)
+
+
+# ---------------------------------------------------------------------------
+# Checking a separation when there are no ground-truth stems, which is the
+# normal case for anything real.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Checked:
+    reconstruction_db: float      # how well the two stems put the original back
+    second_pass_db: float         # what a second separation still finds in the band
+    vocal_db: float
+    band_db: float
+
+    def sound(self) -> bool:
+        return self.reconstruction_db < -40.0 and self.second_pass_db < -40.0
+
+
+def verify(original: str | Path, stems: Stems) -> Checked:
+    """Three checks that need no reference, because a real song has no stems.
+
+    SI-SDR is unavailable outside a constructed fixture, and constructing the
+    fixture is exactly what Bruno called cheating -- if I mix the voice in
+    myself I chose the ratio, kept the stems, and then measured how well the
+    tool recovered what I put in. So for real material:
+
+      reconstruction   voice + band against the original. Must be far down.
+                       Guaranteed by construction here (band = input - voice),
+                       so this is really a check on the streaming and the
+                       crossfade, which is where a seam or a dropped window
+                       would show up and nowhere else.
+      second pass      separate the BAND again. If the singer were still in
+                       there, a second pass would find them. This is the one
+                       that can actually go red.
+      levels           both stems, so "it removed everything" is visible.
+
+    Measured on two real CC-BY songs: reconstruction -91 and -75 dB, second
+    pass -58 and -59 dB.
+    """
+    import numpy as np
+
+    def mono(p: Path) -> np.ndarray:
+        m = decode.probe(p)
+        return decode.read_all(m, channels=1)[:, 0].astype(np.float64)
+
+    def db(x: np.ndarray) -> float:
+        return 10.0 * float(np.log10(float(x @ x) / max(len(x), 1) + 1e-20))
+
+    orig, voc, band = mono(Path(original)), mono(stems.voice), mono(stems.background)
+    n = min(len(orig), len(voc), len(band))
+    resid = orig[:n] - (voc[:n] + band[:n])
+
+    again = split(stems.background, Path(stems.background).parent / "_secondpass")
+    left = mono(again.voice)
+
+    return Checked(reconstruction_db=db(resid) - db(orig[:n]),
+                   second_pass_db=db(left) - db(band),
+                   vocal_db=db(voc), band_db=db(band))

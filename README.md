@@ -165,6 +165,41 @@ five LU under a score without errors, so it cannot grade this at all. The
 ceiling is the instrument. Whether it *sounds* better is a judgement no tool
 here can make.
 
+### `--split` — a song in, the singer and the band out
+
+The plain case, and the one to try first:
+
+```
+earshot song.mp3 --split
+```
+
+Two files, nothing added. Bruno's framing, and he was right about it: mixing a
+narrator over a track *myself* and then measuring how well the tool recovered it
+is cheating — I chose the ratio, kept the stems, and passed a test I had built.
+
+**Verifying it without reference stems**, because a real song has none:
+
+| | McKell Ross and Gill, *Remember* | Shearer, *Martyr* |
+|---|---|---|
+| the two stems rebuild the original to | **−91 dB** | **−75 dB** |
+| separating the band *again* still finds | −58 dB | −59 dB |
+| a recogniser gets, from the full song | 18 words | **0 words** |
+| the same recogniser, from the vocal stem | 19 words | **7 words** |
+
+Both CC-BY. The Shearer row is the one worth looking at: a speech recogniser
+can get nothing out of the mix and seven words out of the extracted vocal, and
+it is the only instrument in this table that is not mine.
+
+The second-pass check is the one that can actually go red — if the singer were
+still in the band stem, separating it a second time would find them.
+
+**And this is the easy case, not a hard one.** htdemucs is trained to pull sung
+vocals out of music, so a song is its home ground; the speech-under-music
+problem the rest of this README is about is off to the side of what it was built
+for. Yesterday's "the singer comes out with the narrator" limitation and this
+result are the same behaviour with the sign flipped, depending which one you
+asked for.
+
 ### `--fix` — level only, no separation
 
 Lifts quiet dialogue toward a consistent level and pulls loud non-speech

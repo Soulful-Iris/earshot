@@ -5,6 +5,12 @@
     earshot FILE_OR_URL --fix [OUT]     re-balance by level only, no separation
     earshot FILE_OR_URL --enhance [OUT] pull the voice out and set the ratio
     earshot FILE_OR_URL --voice-only    the separated voice, nothing under it
+    earshot FILE_OR_URL --split         write both stems and check them
+
+`--split` is the plain case: a song in, the singer in one file and the band in
+another, nothing added. It then verifies without needing reference stems --
+the two halves must reconstruct the original, and separating the band a second
+time must find almost nothing left.
 
   --to N   with --enhance, how many LU above the background to put the voice
            (default 12; under +4 is where people reach for the subtitles)
@@ -69,6 +75,15 @@ def main(argv: list[str] | None = None) -> int:
     if voice_only:
         argv.remove("--voice-only")
 
+    do_split = "--split" in argv
+    if do_split:
+        i = argv.index("--split")
+        argv.pop(i)
+        if i < len(argv) and not argv[i].startswith("-"):
+            out_dir_arg = argv.pop(i)
+        else:
+            out_dir_arg = None
+
     out_path = None
     do_fix = do_enhance = False
     for flag in ("--fix", "--enhance"):
@@ -86,6 +101,26 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(path).exists():
         print(f"no such file: {path}", file=sys.stderr)
         return 2
+
+    if do_split:
+        from . import separate
+        out = Path(out_dir_arg) if out_dir_arg else Path(path).with_suffix("").parent
+        stems = separate.split(path, out)
+        c = separate.verify(path, stems)
+        if as_json:
+            print(json.dumps({"voice": str(stems.voice), "band": str(stems.background),
+                              "reconstruction_db": c.reconstruction_db,
+                              "second_pass_db": c.second_pass_db,
+                              "sound": c.sound()}, indent=2))
+        else:
+            print(f"voice  {stems.voice}")
+            print(f"band   {stems.background}")
+            print()
+            print(f"  the two stems rebuild the original to {c.reconstruction_db:+.0f} dB")
+            print(f"  separating the band again finds {c.second_pass_db:+.0f} dB still in it")
+            print(f"  levels: voice {c.vocal_db:.1f} dB, band {c.band_db:.1f} dB")
+            print(f"  {'looks sound' if c.sound() else 'SOMETHING IS WRONG WITH THIS SPLIT'}")
+        return 0
 
     if do_enhance or voice_only:
         from . import separate
