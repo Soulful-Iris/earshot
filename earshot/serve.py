@@ -158,6 +158,156 @@ def parse_multipart(body: bytes, content_type: str) -> tuple[dict, bytes, str]:
     return fields, payload, filename
 
 
+UPLOAD_CHUNK = 1 << 20
+
+
+def read_multipart_to_disk(rfile, content_type: str, length: int,
+                           dest: Path, max_bytes: int) -> tuple[dict, int, str]:
+    """Stream one uploaded file straight to `dest`, keeping the fields.
+
+    `parse_multipart` above takes the whole body as bytes and is fine for the
+    small forms it was written for. It is the wrong shape for a file: reading
+    the body costs one copy, `body.split(sep)` costs another, and slicing the
+    payload out costs a third.
+
+    Measured on this box, 2026-09-02: a 24 MB upload took the server from 76 MB
+    RSS to 159 MB. **83 MB of memory for a 24 MB file, ~3.5x.** The unit caps
+    the service at 700M and `ThreadingHTTPServer` serves uploads concurrently,
+    so the multiplier is what pins MAX_MB at 25 rather than any property of the
+    audio. It was not failing. It was the reason the limit could not rise.
+
+    `fetch()` six functions above already does this correctly for URLs -- 1 MB
+    chunks, straight to disk, cap enforced *during* the read. The upload path
+    did the opposite in the same file, which is
+    fix-the-sibling-not-just-the-call-site with both siblings visible on one
+    screen.
+
+    Returns (fields, bytes_written, filename). `bytes_written` is 0 and
+    `filename` is "" when the form carried no file part.
+
+    The cap is enforced as the bytes arrive, so an oversized upload is refused
+    partway through rather than after it has all been accepted.
+    """
+    marker = "boundary="
+    if marker not in content_type:
+        raise studio.Refused("that upload was malformed")
+    boundary = content_type.split(marker, 1)[1].strip().strip('"')
+    sep = b"--" + boundary.encode()
+
+    fields: dict[str, str] = {}
+    filename = ""
+    written = 0
+    remaining = length
+    buf = b""
+    out = None
+
+    def read_more() -> bool:
+        """Pull one chunk off the socket into `buf`. False at end of body."""
+        nonlocal buf, remaining
+        if remaining <= 0:
+            return False
+        chunk = rfile.read(min(UPLOAD_CHUNK, remaining))
+        if not chunk:
+            remaining = 0
+            return False
+        remaining -= len(chunk)
+        buf += chunk
+        return True
+
+    def take_header() -> str | None:
+        """Consume up to and including the blank line ending a part's header."""
+        nonlocal buf
+        while b"\r\n\r\n" not in buf:
+            if not read_more():
+                return None
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        return head.decode("utf8", "replace")
+
+    try:
+        # Skip the preamble up to the first boundary.
+        while sep not in buf:
+            if not read_more():
+                raise studio.Refused("that upload was malformed")
+        buf = buf.split(sep, 1)[1]
+
+        while True:
+            if buf[:2] == b"--":               # closing boundary; body is done
+                break
+            head = take_header()
+            if head is None:
+                break
+            name = (head.split('name="', 1)[1].split('"', 1)[0]
+                    if 'name="' in head else "")
+            is_file = 'filename="' in head
+            if is_file:
+                filename = head.split('filename="', 1)[1].split('"', 1)[0]
+
+            if is_file and out is None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                out = dest.open("wb")
+
+            # Read this part's body until the next boundary. A boundary can
+            # land across a chunk edge, so always hold back enough bytes that a
+            # split one is still whole next time round. Without this the file
+            # is written correctly for every size that happens not to straddle
+            # a 1 MB line, which is most of them -- the bug would pass every
+            # small fixture and corrupt real songs.
+            hold = len(sep) + 4
+            value = b""
+            while True:
+                idx = buf.find(sep)
+                if idx != -1:
+                    piece, buf = buf[:idx], buf[idx + len(sep):]
+                    piece = piece[:-2] if piece.endswith(b"\r\n") else piece
+                    if is_file and out is not None:
+                        written += len(piece)
+                        if written > max_bytes:
+                            raise studio.Refused(
+                                f"stopped at {max_bytes >> 20} MB; that file is too big")
+                        out.write(piece)
+                    else:
+                        value += piece
+                    break
+                if len(buf) > hold:
+                    piece, buf = buf[:-hold], buf[-hold:]
+                    if is_file and out is not None:
+                        written += len(piece)
+                        if written > max_bytes:
+                            raise studio.Refused(
+                                f"stopped at {max_bytes >> 20} MB; that file is too big")
+                        out.write(piece)
+                    else:
+                        value += piece
+                if not read_more():
+                    # Truncated body. Whatever is left belongs to this part.
+                    if is_file and out is not None:
+                        out.write(buf)
+                        written += len(buf)
+                    else:
+                        value += buf
+                    buf = b"--"
+                    break
+
+            if not is_file and name:
+                prev = fields.get(name, "")
+                fields[name] = ((prev + "," if prev else "")
+                                + value.decode("utf8", "replace"))
+    finally:
+        if out is not None:
+            out.close()
+        # Never leave the rest of the request in the socket: under keep-alive
+        # the next request gets parsed starting mid-payload and surfaces as a
+        # mystery 400 on something unrelated. Already learned once, on the talk
+        # door, in living-on-the-box.
+        while remaining > 0:
+            chunk = rfile.read(min(UPLOAD_CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
+    return fields, written, filename
+
+
 PAGE = """<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>earshot &mdash; is the dialogue actually audible?</title>
@@ -318,21 +468,41 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(413, {"ok": False,
                                  "why": f"that file is over {studio.MAX_MB} MB"})
                 return
-            raw = self.rfile.read(length)
+            # The filename is only needed for its suffix, and it arrives inside
+            # the body we have not read yet, so stage under a neutral one and
+            # let `adopt` see the real name.
+            jid, staged = studio.staging_path("upload.mp3")
+            adopted = False
             try:
-                fields, payload, filename = parse_multipart(
-                    raw, self.headers.get("Content-Type", ""))
-                if not payload:
+                fields, written, filename = read_multipart_to_disk(
+                    self.rfile, self.headers.get("Content-Type", ""), length,
+                    staged, studio.MAX_MB << 20)
+                if not written:
                     raise studio.Refused("no file arrived")
+                # Keep the real extension: decode.probe sniffs the container,
+                # but ffmpeg does better with a truthful suffix.
+                suffix = Path(filename or "").suffix.lower()[:6]
+                if suffix and suffix != staged.suffix:
+                    staged = staged.rename(staged.with_suffix(suffix))
                 parts = [p for p in (fields.get("part", "")).split(",") if p]
-                job = studio.new_job(payload, filename or "upload.mp3", parts,
-                                     __import__("earshot.separate", fromlist=["x"]).SIX)
+                job = studio.adopt(jid, staged, filename or "upload.mp3", parts,
+                                   __import__("earshot.separate", fromlist=["x"]).SIX)
+                adopted = True
                 self._json(200, {"ok": True, "id": job.id})
             except studio.Refused as e:
                 self._json(400, {"ok": False, "why": str(e)})
             except Exception:                                 # noqa: BLE001
                 traceback.print_exc()
                 self._json(500, {"ok": False, "why": "that broke on my side, sorry"})
+            finally:
+                # Staging happens BEFORE the bytes arrive, so every path that
+                # does not reach a job -- malformed body, over the cap, no file
+                # part, a raise in the middle -- has already made a directory.
+                # Left behind, it has no job.json and reads as a job stuck in
+                # "queued" for ever. `adopt` clears up after its own failures;
+                # this clears up after everything before it.
+                if not adopted:
+                    studio.abandon(jid)
             return
 
         raw = self.rfile.read(min(length, 4096))

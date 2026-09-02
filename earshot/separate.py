@@ -127,9 +127,35 @@ SIX = "htdemucs_6s"
 FOUR = "htdemucs"
 
 
+# What each model's output layer is. A static property of the architecture, not
+# something the weights decide -- so asking for it should not cost the weights.
+#
+# It used to. `available()` called `model(name).sources`, which loads the whole
+# network, and the WEB SERVER calls `available()` on every upload. Measured
+# 2026-09-02: the server sat at 735 MB RSS, 672 MiB in its cgroup against a
+# MemoryMax of 700 MiB -- 96% of its cap, permanently, from the first upload
+# onward -- with 165 torch mappings in a process whose whole job is to take a
+# file and hand it to the worker. The out-of-process worker under its own cap
+# exists precisely so the model never lives here, and this pulled it in through
+# the back door. One bad allocation from an OOM kill, and when the server dies
+# the site is down.
+#
+# `SOURCES` has to stay true, so `tests/test_sources.py` loads both models and
+# compares. The table cannot drift without something going red; that check
+# simply runs where there is memory for it, rather than on every upload.
+SOURCES = {
+    "htdemucs":    ["drums", "bass", "other", "vocals"],
+    "htdemucs_6s": ["drums", "bass", "other", "vocals", "guitar", "piano"],
+}
+
+
 def available(model_name: str = SIX) -> list[str]:
-    """Which parts this model can actually produce."""
-    sources = model(model_name).sources
+    """Which parts this model can actually produce. Costs nothing."""
+    sources = SOURCES.get(model_name)
+    if sources is None:
+        # An unknown model is worth the load: slow beats wrong, and it keeps
+        # this honest for anything added later without touching SOURCES.
+        sources = list(model(model_name).sources)
     out = ["vocals", "band"] if "vocals" in sources else []
     return out + [s for s in ("drums", "bass", "guitar", "piano", "other")
                   if s in sources]

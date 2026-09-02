@@ -68,22 +68,51 @@ class Job:
             return {"state": "working"}
 
 
+def staging_path(filename: str) -> tuple[str, Path]:
+    """Where an upload should be streamed to, before it is a job.
+
+    Handed out BEFORE the bytes arrive so the server can write straight to disk
+    instead of holding the file in memory. Returns the job id it will become and
+    the path to write. `adopt` finishes the job once the bytes are there;
+    `abandon` cleans up if they never fully arrive.
+    """
+    jid = uuid.uuid4().hex[:12]
+    d = JOBS / jid
+    (d / "out").mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix.lower()[:6] or ".mp3"
+    return jid, d / f"source{suffix}"
+
+
+def abandon(jid: str) -> None:
+    shutil.rmtree(JOBS / jid, ignore_errors=True)
+
+
 def new_job(data: bytes, filename: str, parts: list[str], model: str) -> Job:
+    """Byte-buffered entry point. Kept for callers that already hold the file.
+
+    The web upload does NOT come through here any more -- it streams to
+    `staging_path()` and calls `adopt()`. See `serve.read_multipart_to_disk`
+    for the measurement that motivated it.
+    """
+    if len(data) > MAX_MB << 20:
+        raise Refused(f"that file is over {MAX_MB} MB")
+    jid, src = staging_path(filename)
+    src.write_bytes(data)
+    return adopt(jid, src, filename, parts, model)
+
+
+def adopt(jid: str, src: Path, filename: str, parts: list[str], model: str) -> Job:
+    """Turn a file already on disk into a queued job."""
     from . import decode, separate
 
-    if len(data) > MAX_MB << 20:
+    d = JOBS / jid
+    if src.stat().st_size > MAX_MB << 20:
+        shutil.rmtree(d, ignore_errors=True)
         raise Refused(f"that file is over {MAX_MB} MB")
     # `parts` is ignored on purpose and kept in the signature so old callers do
     # not break. Everything is produced every time; choosing happens afterwards,
     # when there is something to choose between.
     parts = separate.available(model)
-
-    jid = uuid.uuid4().hex[:12]
-    d = JOBS / jid
-    (d / "out").mkdir(parents=True, exist_ok=True)
-    suffix = Path(filename).suffix.lower()[:6] or ".mp3"
-    src = d / f"source{suffix}"
-    src.write_bytes(data)
 
     try:
         media = decode.probe(src)
