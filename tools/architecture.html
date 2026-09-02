@@ -2,9 +2,9 @@
 <style>
  *{box-sizing:border-box;margin:0;padding:0}
  body{background:#0d0f12;color:#e7e3dc;font:15px/1.5 ui-sans-serif,system-ui,sans-serif;
-      width:420px;padding:22px 18px 26px}
+      width:440px;padding:22px 18px 26px}
  h1{font-size:1.15rem;letter-spacing:-.01em;margin-bottom:2px}
- .sub{color:#7d848c;font-size:.8rem;margin-bottom:18px}
+ .sub{color:#7d848c;font-size:.8rem;margin-bottom:16px}
  .box{border:1px solid #23272e;border-radius:.55rem;background:#14171c;
       padding:.65rem .75rem;margin-bottom:0}
  .box.hot{border-color:#c8a24a;background:#1a1712}
@@ -21,57 +21,104 @@
  .side .box{flex:1;margin:0}
  .lbl{color:#6b7178;font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
       margin:16px 0 6px;font-weight:600}
- .foot{color:#7d848c;font-size:.75rem;margin-top:16px;border-top:1px solid #1e222a;
+ .foot{color:#7d848c;font-size:.75rem;margin-top:14px;border-top:1px solid #1e222a;
        padding-top:10px;line-height:1.5}
  code{font:11.5px ui-monospace,monospace;color:#c8a24a}
+ /* The one box everything actually runs in. Drawn as a real container because
+    the whole point of this picture is that the boundary is smaller than it
+    looks from outside. */
+ .machine{border:1px dashed #3a4550;border-radius:.7rem;padding:10px 12px 14px;
+          margin-top:6px;background:#101318;position:relative}
+ .machine>.cap{position:absolute;top:-9px;left:12px;background:#0d0f12;
+               padding:0 .45rem;color:#8a939c;font:11px ui-monospace,monospace;
+               letter-spacing:.06em}
+ .warn{border:1px solid #6b4a1e;background:#1a1409;border-radius:.55rem;
+       padding:.6rem .75rem;margin-top:14px}
+ .warn .t{color:#e0b45f}
+ .num{width:100%;border-collapse:collapse;margin-top:.5rem;
+      font:11.5px ui-monospace,monospace}
+ .num td{padding:.16rem 0;color:#9aa2ab;border-bottom:1px solid #191d24}
+ .num td:last-child{text-align:right;color:#e7e3dc}
+ .kill{color:#8b9199;text-decoration:line-through}
 </style>
 <body>
-<h1>earshot</h1>
-<div class=sub>everything on one 2-core box with 1.8 GB and no GPU</div>
+<h1>earshot &mdash; what actually runs</h1>
+<div class=sub>Short answer to &ldquo;processing happens outside your box&rdquo;: it does not.
+Every part below is one <code>t4g.small</code>. 2 cores, 1.8 GB, no GPU.</div>
 
 <div class=lbl>the way in</div>
 <div class=box><div class=t>phone / browser<span>the page</span></div>
-  <div class=d>job id lives in the URL hash, so leaving and coming back resumes it</div></div>
+  <div class=d>Job id lives in the URL hash, so closing the tab and coming back resumes it.</div></div>
 <div class=arrow><span>https</span></div>
 <div class=box cool><div class=t>cloudflared tunnel<span>outbound only</span></div>
-  <div class=d>earshot.soulful-ai.dev to 127.0.0.1:8781. No inbound port is open on the box at all.</div></div>
+  <div class=d>earshot.soulful-ai.dev -&gt; 127.0.0.1:8781. The box dials out; nothing
+  dials in. Checked rather than assumed: the security group has <b>zero</b> inbound
+  rules, so even sshd &mdash; which is bound to :22 &mdash; is unreachable from
+  outside. Nothing listening is nothing reachable only because of that rule.</div></div>
+
+<div class=machine>
+<div class=cap>ONE EC2 BOX &mdash; us-east-1 &mdash; everything below here</div>
 
 <div class=lbl>the front door</div>
-<div class=arrow><span>&nbsp;</span></div>
-<div class=box><div class=t>earshot.serve<span>systemd unit</span></div>
-  <div class=d>stdlib http server. Serves the page, takes the upload, reports status,
-  serves stems. Never separates anything itself — it must stay answering.</div></div>
+<div class=box><div class=t>earshot.serve<span>systemd unit, 700M cap</span></div>
+  <div class=d>Stdlib http server. Serves the page, takes the upload straight to
+  disk in 1 MB chunks, reports status, serves stems. It separates nothing and
+  now loads no model &mdash; it has to stay answering.</div></div>
 <div class=arrow><span>accepts, caps, queues</span></div>
 <div class=box><div class=t>studio.py<span>queue of one</span></div>
-  <div class=d>25 MB, 6 minutes, one job at a time. Two concurrent jobs is 2.8 GB
-  on a 1.8 GB machine, so the queue is not politeness.</div></div>
+  <div class=d>25 MB, 6 minutes, ONE job at a time. Two concurrent jobs is 2.8 GB
+  on a 1.8 GB machine, so the queue is not politeness &mdash; it is the whole
+  reason a second upload does not kill the first.</div></div>
 
 <div class=lbl>the work, kept away from the door</div>
 <div class=arrow><span>subprocess</span></div>
 <div class=box hot><div class=t>worker.py<span>MemoryMax 1500M</span></div>
-  <div class=d>Its own process, in its own systemd scope. A job that goes wrong
+  <div class=d>Its own process in its own systemd scope, so a job that goes wrong
   dies alone instead of taking the site with it.</div></div>
-<div class=arrow><span>&nbsp;</span></div>
-<div class=box hot><div class=t>htdemucs_6s<span>~3× realtime</span></div>
+<div class=arrow><span>loads the model, not the server</span></div>
+<div class=box hot><div class=t>htdemucs_6s<span>~3&times; realtime, on CPU</span></div>
   <div class=d>5-second windows, 25% overlap, crossfaded and written out behind the
-  read head. Nothing whole-file is ever in memory — a 90-minute film is 1.9 GB
-  as float32 and this box has 1.8.</div></div>
-<div class=arrow><span>7 stems, mp3 192k</span></div>
+  read head. Nothing whole-file is ever in memory: a 90-minute film is 1.9 GB as
+  float32 and this box has 1.8.</div></div>
+</div>
 
-<div class=lbl>keeping it</div>
+<div class=arrow><span>7 stems, mp3 192k</span></div>
 <div class=side>
   <div class=box cool><div class=t>S3</div>
-    <div class=d>private, 403 to everyone. Local copy swept after 6 h; the download
-    route pulls it back from S3 on demand, so an old link still works.</div></div>
+    <div class=d>Private, 403 to everyone. The local copy is swept after 6 h and the
+    download route pulls it back from S3, so an old link still works.</div></div>
   <div class=box cool><div class=t>SES</div>
-    <div class=d>email when it finishes, with links to this site rather than
-    presigned URLs — those expire when the instance role rotates.</div></div>
+    <div class=d>Email on finish, linking to this site rather than presigned URLs &mdash;
+    those die when the instance role rotates.</div></div>
+</div>
+
+<div class=warn>
+<div class=t>You asked if one box is the best architecture. It is not.</div>
+<div class=d>It is what I could reach, and a diagram makes every compromise look
+like a decision. The queue of one is not a design choice, it is a symptom.
+<b>As of tonight the constraint is gone</b> &mdash; <code>iam:CreateRole</code> is
+allowed as long as the role carries the account&rsquo;s permissions boundary, and I
+ran a real Fargate task end to end to check. So a task per job, off this box, is
+available now and needs nothing from you.</div>
+<table class=num>
+<tr><td>separation, 1 thread &mdash; 10 s of audio</td><td>24.9 s</td></tr>
+<tr><td>separation, 2 threads</td><td>19.1 s</td></tr>
+<tr><td>speed-up from doubling the cores</td><td>1.30&times;</td></tr>
+<tr><td>parallel fraction -&gt; Amdahl ceiling, any CPU</td><td>~1.9&times;</td></tr>
+<tr><td>GPU, from the literature &mdash; NOT measured by me</td><td>~20&times;</td></tr>
+</table>
+<div class=d style="margin-top:.55rem">So a 16-vCPU container buys almost nothing:
+only about 46% of the work parallelises. <b>The win from moving off the box is not
+speed, it is that jobs stop queueing behind each other and a job can no longer
+kill the website.</b> Real speed needs a GPU, and <code>ec2:RunInstances</code> and
+SageMaker are both explicitly denied &mdash; that one would be a decision for you.</div>
 </div>
 
 <div class=foot>
 Delivery cannot fail the job: S3 and email are wrapped, because the one real
-failure so far was a finished separation reported as a failure by the step
-after it. Progress is <code>seconds done / seconds total</code>, written to a
-file by the worker — at 3× realtime a spinner is a lie for ten minutes.
+failure so far was a finished separation reported as a failure by the step after
+it. Progress is <code>seconds done / seconds total</code> written to a file by the
+worker &mdash; at 3&times; realtime a spinner is a lie for ten minutes at a stretch.
+Every box here was read off the live config tonight, not from memory.
 </div>
 </body>
