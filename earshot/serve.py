@@ -32,6 +32,8 @@ from tempfile import mkdtemp
 from . import decode, measure, report, studio
 
 MAX_MB = 80
+# A sung take is a couple of minutes of opus, not an album.
+TAKE_MAX_MB = 30
 MAX_MINUTES = 30.0
 PER_IP_COOLDOWN = 60.0
 DAILY_JOBS = 300
@@ -432,6 +434,10 @@ class Handler(BaseHTTPRequestHandler):
                 name = (st.get("videos") or {}).get(key)
                 if name:
                     allowed.add(name)
+            for key in ("placed", "unplaced"):
+                name = (st.get("liveroom") or {}).get(key)
+                if name:
+                    allowed.add(name)
             # words.json only becomes servable once the status says it was
             # written. Adding it as a blanket exception would let any job id
             # fish for a file the worker never made.
@@ -610,6 +616,48 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=pull, daemon=True).start()
             self._json(200, {"ok": True, "id": jid, "title": found.title})
+            return
+
+        # --- a take, to be placed in the record's room ----------------------
+        # Streams to disk like every other upload here. The placement itself is
+        # a subprocess, so this returns as soon as the bytes have landed and the
+        # page polls the status it already polls.
+        if self.path.startswith("/jobs/") and self.path.endswith("/take"):
+            jid = self.path[len("/jobs/"):-len("/take")]
+            if not jid.isalnum() or len(jid) > 32 or not (studio.JOBS / jid).is_dir():
+                self._json(404, {"ok": False, "why": "no such project"})
+                return
+            st = studio.Job(jid, studio.JOBS / jid).status
+            parts = st.get("parts") or {}
+            if not (parts.get("vocals") and parts.get("band")):
+                self._json(400, {"ok": False,
+                                 "why": "that project has no separated voice to "
+                                        "measure a room from"})
+                return
+            if length > (TAKE_MAX_MB + 2) << 20:
+                self._json(413, {"ok": False,
+                                 "why": f"a take over {TAKE_MAX_MB} MB is longer "
+                                        f"than this is for"})
+                return
+
+            take = studio.JOBS / jid / "take.webm"
+            got = 0
+            with take.open("wb") as f:
+                while got < length:
+                    chunk = self.rfile.read(min(1 << 20, length - got))
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    f.write(chunk)
+            if got < 4096:
+                take.unlink(missing_ok=True)
+                self._json(400, {"ok": False, "why": "that recording is empty"})
+                return
+
+            studio.write_status(jid, liveroom={"state": "queued"})
+            threading.Thread(target=studio.place_take, args=(jid, take),
+                             daemon=True).start()
+            self._json(200, {"ok": True, "id": jid})
             return
 
         if self.path == "/jobs":

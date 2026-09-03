@@ -1,0 +1,90 @@
+"""One take, placed in the record's room, in its own process.
+
+    python -m earshot.placer /path/to/job take.webm
+
+Out of process for the same reason the separator is: `matchering` loads the
+whole take and the whole reference into memory and ends in its own limiter, and
+the web server it would otherwise share a process with is capped at 700 MB and
+also answers the door. A take that goes wrong has to be able to die alone.
+
+It writes into the SAME status.json the page already polls, under `liveroom`,
+so nothing new had to learn how to report progress.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import time
+import traceback
+from pathlib import Path
+
+from .worker import write_status
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) < 2:
+        print("usage: python -m earshot.placer JOB_DIR TAKE", file=sys.stderr)
+        return 2
+    job, take = Path(argv[0]), Path(argv[0]) / argv[1]
+    started = time.time()
+
+    try:
+        from . import liveroom as lr
+
+        st = json.loads((job / "status.json").read_text())
+        parts = st.get("parts") or {}
+        vocals = job / "out" / (parts.get("vocals") or "")
+        band = job / "out" / (parts.get("band") or "")
+        if not (vocals.is_file() and band.is_file()):
+            raise RuntimeError("this job has no separated vocal and band to work from")
+
+        write_status(job, liveroom={"state": "working",
+                                    "stage": "measuring the room on the record"})
+        d = lr.assess(take, vocals, band, job / "lr")
+
+        if not d.ok:
+            # A refusal is an answer and it is finished, not failed. The page
+            # says the sentence; nothing is produced on purpose.
+            write_status(job, liveroom={
+                "state": "refused", "why": d.why,
+                "record_tail": None if not d.record or d.record.tail is None
+                               else round(d.record.tail, 3),
+                "take_tail": None if not d.take or d.take.tail is None
+                             else round(d.take.tail, 3),
+                "elapsed": round(time.time() - started, 1)})
+            print(f"refused: {d.why}", flush=True)
+            return 0
+
+        write_status(job, liveroom={"state": "working",
+                                    "stage": "putting you in the room"})
+        steps = lr.place(take, vocals, band, d.room, job / "out")
+
+        write_status(job, liveroom={
+            "state": "done",
+            "record_tail": round(d.record.tail, 3),
+            "take_tail": round(d.take.tail, 3),
+            "room": {"rt60": d.room.rt60, "tilt": d.room.tilt,
+                     "measured": None if d.room.measured is None
+                                 else round(d.room.measured, 3)},
+            "placed": steps.get("placed"), "unplaced": steps.get("unplaced"),
+            "target_lufs": steps.get("target_lufs"),
+            "placed_lufs": steps.get("placed_lufs"),
+            "room_took_db": steps.get("room_took_db"),
+            "colour": steps.get("colour"),
+            "elapsed": round(time.time() - started, 1)})
+        print(f"placed in {time.time() - started:.0f}s: {steps}", flush=True)
+        return 0
+
+    except Exception as e:                                   # noqa: BLE001
+        # Recorded, never only logged. A process that stops writing looks
+        # exactly like one that is being slow.
+        write_status(job, liveroom={"state": "failed",
+                                    "why": f"{type(e).__name__}: {e}"[:300],
+                                    "elapsed": round(time.time() - started, 1)})
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

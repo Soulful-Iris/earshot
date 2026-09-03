@@ -62,6 +62,10 @@
                padding:.8rem .85rem;font:inherit}
  .urlrow input:focus{outline:none;border-color:#c8a24a}
  .urlrow button{width:auto;flex:0 0 auto;margin-top:0;padding:.8rem 1.4rem}
+ .sing{border-top:1px solid #1e222a;padding:.9rem 0 .6rem}
+ .sing .hd{font-weight:600;font-size:1.05rem}
+ .sing .meta{color:#7d848c;font-size:.88rem;margin:.25rem 0 .6rem;line-height:1.45}
+ .sing button.go{width:auto;padding:.5rem 1.1rem;font-size:.95rem}
  .vid{border-top:1px solid #1e222a;padding:.85rem 0}
  .vid .top{display:flex;align-items:baseline;gap:.6rem}
  .vid .n{font-weight:600;font-size:1.05rem}
@@ -290,6 +294,13 @@ async function poll() {
     // opens with seven audio files and hides the video below them is the
     // ingredients-instead-of-the-dish mistake all over again, in CSS.
     const rows = [];
+
+    // SING ON IT. Only offered when there is a separated voice to measure a
+    // room from, because that is the whole method: the singer's reverb tail is
+    // sitting in the gaps between their phrases once the vocal is on its own.
+    const canSing = d.found && d.found.vocals && d.found.band;
+    if (canSing) rows.push(singPanel(d));
+
     const V = d.videos;
     if (V && V.with_voice) {
       const one = (file, title, sub) => `<div class=vid>
@@ -362,6 +373,7 @@ async function poll() {
           highlighter. The stems above are unaffected.</div></div>`);
     }
     $('#stems').innerHTML = rows.join('');
+    if (canSing) wireSing(d);
     $('#foot').textContent =
       `took ${Math.round(d.elapsed)}s. kept in S3 — this link keeps working: `
       + location.origin + '/#' + jobId;
@@ -378,4 +390,101 @@ async function poll() {
   }
   setTimeout(poll, 2500);
 }
+
+// --- singing on the record --------------------------------------------------
+//
+// The band plays and the microphone records at the same time, so the take is
+// aligned by construction and there is no offset search anywhere.
+//
+// echoCancellation, noiseSuppression and autoGainControl are all switched OFF
+// deliberately. Browser voice processing is built to make conference calls
+// intelligible: it ducks, gates and levels, and every one of those destroys the
+// decay and the level this thing measures. Left on, it would quietly remove the
+// evidence.
+let mediaRec = null, chunks = [], bandEl = null;
+
+function singPanel(d) {
+  const L = d.liveroom || {};
+  if (L.state === 'done') {
+    const one = (f, t, sub) => `<div class=vid>
+      <div class=top><span class=n>${t}</span></div>
+      <div class=d>${sub}</div>
+      <audio controls preload=metadata src="/jobs/${jobId}/${f}"></audio>
+      <a class=dl href="/jobs/${jobId}/${f}" download>Download</a></div>`;
+    const r = L.room || {};
+    return `<div class=sing><div class=hd>You, on the record</div>
+      <div class=meta>the record's room measures ${L.record_tail}s, yours
+        measured ${L.take_tail}s, so you were put in a ${r.rt60}s
+        ${r.tilt} one${L.placed_lufs != null ? ' at ' + L.placed_lufs + ' LUFS' : ''}</div>
+      </div>` + one(L.unplaced, 'Just you on top', 'the take as recorded')
+             + one(L.placed, 'You in their room', 'same take, placed');
+  }
+  if (L.state === 'refused')
+    return `<div class=sing><div class=hd>Not this take</div>
+      <div class=meta>${L.why}</div>
+      <button class=go id=singagain>Record another one</button></div>`;
+  if (L.state === 'queued' || L.state === 'working')
+    return `<div class=sing><div class=hd>Placing you in the room</div>
+      <div class=meta>${L.stage || 'starting'}…</div></div>`;
+  if (L.state === 'failed')
+    return `<div class=sing><div class=hd>That did not work</div>
+      <div class=meta>${L.why || 'unknown'}</div>
+      <button class=go id=singagain>Try again</button></div>`;
+  return `<div class=sing>
+    <div class=hd>Sing on it</div>
+    <div class=meta>Headphones on, and stand somewhere with soft things in it.
+      The backing plays while you sing; if it gets into the microphone this
+      cannot measure anything and will say so.</div>
+    <button class=go id=singgo>Record</button>
+    <span class=meta id=singstate></span></div>`;
+}
+
+function wireSing(d) {
+  const again = document.getElementById('singagain');
+  if (again) again.onclick = () => {
+    // Clear the previous verdict so the panel offers the button again.
+    (d.liveroom || {}).state = null;
+    $('#stems').innerHTML = '';
+    poll();
+  };
+  const go = document.getElementById('singgo');
+  if (!go) return;
+  go.onclick = async () => {
+    if (mediaRec && mediaRec.state === 'recording') return stopSing();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: {
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false}});
+      chunks = [];
+      mediaRec = new MediaRecorder(stream);
+      mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      mediaRec.onstop = () => uploadTake(stream);
+      bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+      bandEl.play();
+      mediaRec.start();
+      go.textContent = 'Stop';
+      document.getElementById('singstate').textContent = 'recording — sing';
+      bandEl.onended = () => { if (mediaRec && mediaRec.state === 'recording') stopSing(); };
+    } catch (e) {
+      document.getElementById('singstate').textContent =
+        'could not open the microphone: ' + e.message;
+    }
+  };
+}
+
+function stopSing() {
+  if (bandEl) { bandEl.pause(); bandEl = null; }
+  if (mediaRec && mediaRec.state === 'recording') mediaRec.stop();
+}
+
+async function uploadTake(stream) {
+  stream.getTracks().forEach(t => t.stop());
+  const blob = new Blob(chunks, {type: 'audio/webm'});
+  const el = document.getElementById('singstate');
+  if (el) el.textContent = 'sending ' + Math.round(blob.size / 1024) + ' KB…';
+  const r = await fetch('/jobs/' + jobId + '/take', {method: 'POST', body: blob});
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok && el) { el.textContent = j.why || 'that upload did not land'; return; }
+  poll();
+}
+
 </script>

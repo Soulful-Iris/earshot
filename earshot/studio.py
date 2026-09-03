@@ -170,6 +170,34 @@ def adopt(jid: str, src: Path, filename: str, parts: list[str], model: str,
     return job
 
 
+def place_take(jid: str, take: Path) -> None:
+    """Run the liveroom placement for a finished job, out of process.
+
+    Same shape as `_run` for the separator, and for the same reasons: the real
+    interpreter rather than a name, a memory cap where systemd will give one,
+    and a loud line saying which of those is actually in force.
+    """
+    d = JOBS / jid
+    cmd = [sys.executable, "-m", "earshot.placer", str(d), take.name]
+    scoped = ["systemd-run", "--user", "--scope", "--quiet",
+              "-p", f"MemoryMax={WORKER_MEMORY_MAX}", "-p", "MemorySwapMax=0"] + cmd
+    root = Path(__file__).resolve().parents[1]
+    for attempt in (scoped, cmd):
+        try:
+            print(f"take {jid}: placing "
+                  f"{'under a ' + WORKER_MEMORY_MAX + ' cap' if attempt is scoped else 'UNCAPPED'}",
+                  flush=True)
+            subprocess.run(attempt, cwd=root, capture_output=True, text=True,
+                           timeout=int(MAX_MINUTES * 60 * 6))
+            return
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            write_status(jid, liveroom={"state": "failed",
+                                        "why": "the placement took too long"})
+            return
+
+
 def position(jid: str) -> int:
     """How many jobs are in front of this one. 0 means it is running or next."""
     with _lock:
