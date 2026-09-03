@@ -25,8 +25,28 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+# `language=multi`, NOT `detect_language=true`, and this is the most important
+# line in the file.
+#
+# Measured 2026-09-03 on a real job that had just come back with zero words and
+# the message "some singing genuinely cannot be read":
+#
+#     detect_language=true   ->    0 words
+#     language=ko            ->  131 words
+#     language=multi         ->  119 words
+#
+# The singing was perfectly readable. Deepgram's language AUTO-DETECTION is what
+# fails on sung vocals, so my honest-sounding failure message was a FALSE
+# EXPLANATION: it told somebody their song could not be read while the words sat
+# behind a query parameter. A message naming a false cause is worse than no
+# message, and this one read as humility, which is what made it convincing.
+#
+# Control, because swapping a parameter on the strength of one improvement is
+# how you fix one case and break another. On the Italian stem that already
+# worked: detect gave 50 words at 0.88 confidence, multi gives 48 at 0.88. Two
+# words fewer where it worked, 119 recovered where it did not.
 DEEPGRAM = ("https://api.deepgram.com/v1/listen"
-            "?model=nova-3&punctuate=true&words=true&detect_language=true")
+            "?model=nova-3&punctuate=true&words=true&language=multi")
 
 # Below this, the recogniser is guessing at a shape rather than hearing a word.
 # A highlighter that lands on the wrong syllable is worse than no highlighter,
@@ -104,10 +124,14 @@ def read_vocal(path: str | Path, timeout: int = 300) -> Lyrics:
 
     raw = alt.get("words") or []
     if not raw:
+        # Deliberately narrower than it used to be. The old message asserted a
+        # cause - "some singing genuinely cannot be read, heavy effects, a vocal
+        # buried in the mix" - and that cause was wrong: the real reason was a
+        # query parameter, and the words came back the moment it changed. So
+        # this now reports the OUTCOME and stops, because I do not know why.
         raise Unreadable(
-            "no words came back from the vocal. Some singing genuinely cannot be "
-            "read - heavy effects, shouting, or a vocal buried in the mix. The "
-            "backing track is still fine; there just will not be a highlighter.")
+            "no words came back from the vocal. The backing track is fine; there "
+            "just will not be a highlighter for this one.")
 
     words = [Word(w["word"], float(w["start"]), float(w["end"]),
                   float(w.get("confidence", 0.0))) for w in raw]
