@@ -1,0 +1,109 @@
+"""A swept job must still open, still list, and still be servable.
+
+There was no test here at all, which is how the bug lived for two days: the
+sweeper deleted the whole job directory, its own comment claimed that was safe
+because S3 has a copy, and nothing anywhere checked whether a link to a swept
+job still worked. It did not. `describe()` answered `{"state": "unknown"}`,
+`recent()` skipped the job, and the download route had no allowlist to check a
+filename against, so the files sat in S3 and every route to them 404'd.
+
+Bruno found it by opening the site: "Did you add the videos in the site how i
+asked?" The feature was built, verified end to end, and then quietly erased six
+hours later by housekeeping.
+
+These tests assert the property that actually matters -- the link survives --
+rather than the mechanics of what gets deleted.
+"""
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from earshot import studio
+
+
+@pytest.fixture
+def job(tmp_path, monkeypatch):
+    """A finished job whose media is older than the keep window."""
+    monkeypatch.setattr(studio, "JOBS", tmp_path)
+    jid = "abc123def456"
+    d = tmp_path / jid
+    (d / "out").mkdir(parents=True)
+
+    old = time.time() - (studio.KEEP_HOURS + 2) * 3600
+    (d / "job.json").write_text(json.dumps(
+        {"source": "audio.mp3", "filename": "a song.mp3", "created": old,
+         "video": "vid.mp4"}))
+    (d / "status.json").write_text(json.dumps(
+        {"state": "done",
+         "parts": {"vocals": "vocals.mp3", "band": "band.mp3"},
+         "levels": {"vocals": -1.0, "band": -2.0},
+         "verdict": {"kind": "music with a voice in it", "status": {}},
+         "videos": {"with_voice": "with-voice.mp4", "no_voice": "no-voice.mp4",
+                    "subtitles": True},
+         "kept": ["vocals", "band", "with_voice", "no_voice"]}))
+
+    for name in ("out/vocals.mp3", "out/band.mp3", "out/with-voice.mp4",
+                 "out/no-voice.mp4", "audio.mp3", "vid.mp4"):
+        f = d / name
+        f.write_bytes(b"x" * 4096)
+        import os
+        os.utime(f, (old, old))
+    return jid, d
+
+
+def test_the_media_is_actually_freed(job):
+    jid, d = job
+    assert studio.sweep() == 1
+    assert not (d / "out" / "vocals.mp3").exists()
+    assert not (d / "out" / "with-voice.mp4").exists()
+    assert not (d / "audio.mp3").exists()
+
+
+def test_a_swept_job_still_opens(job):
+    """The one that was missing. Before the fix this returned state=unknown,
+    which the page renders as 'that project is gone'."""
+    jid, d = job
+    studio.sweep()
+    described = studio.describe(studio.Job(jid, d))
+    assert described["state"] == "done", described
+    assert described["found"]["vocals"]["file"] == "vocals.mp3"
+    assert described["videos"]["with_voice"] == "with-voice.mp4"
+
+
+def test_a_swept_job_is_still_in_your_projects(job):
+    jid, _ = job
+    studio.sweep()
+    assert [j["id"] for j in studio.recent()] == [jid]
+
+
+def test_the_index_survives_but_nothing_else_does(job):
+    jid, d = job
+    studio.sweep()
+    left = sorted(f.name for f in d.rglob("*") if f.is_file())
+    assert left == ["job.json", "status.json"], left
+
+
+def test_a_file_restored_from_storage_is_not_swept_out_from_under_the_listener(job):
+    """Sweeping is by each file's OWN age. A stem pulled back from S3 thirty
+    seconds ago belongs to somebody who is playing it right now."""
+    jid, d = job
+    studio.sweep()
+    restored = d / "out" / "vocals.mp3"
+    restored.write_bytes(b"y" * 4096)          # as fetch_s3 would leave it
+    studio.sweep()
+    assert restored.exists(), "swept a file that had just been restored"
+
+
+def test_an_unfinished_job_directory_is_left_alone(tmp_path, monkeypatch):
+    """No job.json means the upload never completed. `abandon` owns that path,
+    not this one."""
+    monkeypatch.setattr(studio, "JOBS", tmp_path)
+    d = tmp_path / "partial00000"
+    d.mkdir()
+    (d / "source.mp3").write_bytes(b"x" * 10)
+    assert studio.sweep() == 0
+    assert (d / "source.mp3").exists()

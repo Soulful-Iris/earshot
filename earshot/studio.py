@@ -265,7 +265,30 @@ def _run(d: Path) -> None:
 
 
 def sweep(now: float | None = None) -> int:
-    """Delete finished jobs older than KEEP_HOURS. Returns how many went."""
+    """Delete the MEDIA of finished jobs older than KEEP_HOURS. Keep the index.
+
+    THIS USED TO DELETE THE WHOLE DIRECTORY, and its own comment said that was
+    safe because "the S3 copy is the point of having one and the download route
+    pulls it back on demand". That sentence was false and it stayed false for
+    two days.
+
+    `job.json` and `status.json` ARE the index. `describe()` returns
+    `{"state": "unknown"}` without them, `recent()` skips the job entirely, and
+    the download route takes the allowed filenames FROM status.json -- so with
+    the directory gone there is nothing to authorise a fetch and nothing to
+    fetch it for. The files sat in S3, perfectly intact, and every link to them
+    404'd.
+
+    Bruno found it by opening the site the morning after I built the videos and
+    seeing an empty projects list: "Hold up. What did you do new to earshot?
+    Did you add the videos in the site how i asked?" I had verified that
+    feature end to end and sent him the two files, and then the housekeeping
+    quietly removed the evidence six hours later.
+
+    So: the audio and video go, the two small json files stay. A swept job still
+    opens, still lists, and still serves -- the first request for a file pulls
+    it back from S3.
+    """
     now = now or time.time()
     gone = 0
     if not JOBS.exists():
@@ -278,11 +301,20 @@ def sweep(now: float | None = None) -> int:
             created = json.loads(spec.read_text()).get("created", 0)
         except json.JSONDecodeError:
             created = d.stat().st_mtime
-        if now - created > KEEP_HOURS * 3600:
-            # Local only. The S3 copy is the point of having one, and the
-            # download route pulls it back on demand -- so sweeping here frees
-            # the disk without breaking a link he was emailed yesterday.
-            shutil.rmtree(d, ignore_errors=True)
+        if now - created <= KEEP_HOURS * 3600:
+            continue
+
+        # By each file's OWN age, so a file just restored from S3 for somebody
+        # who is listening to it right now does not get swept out from under
+        # them on the next pass.
+        freed = 0
+        for f in d.rglob("*"):
+            if not f.is_file() or f.name in ("job.json", "status.json"):
+                continue
+            if now - f.stat().st_mtime > KEEP_HOURS * 3600:
+                f.unlink(missing_ok=True)
+                freed += 1
+        if freed:
             gone += 1
     return gone
 
