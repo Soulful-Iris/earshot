@@ -18,6 +18,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import subprocess
 import threading
 import time
 import traceback
@@ -425,6 +426,12 @@ class Handler(BaseHTTPRequestHandler):
             wanted = rest[1]
             st = studio.Job(jid, d).status
             allowed = set((st.get("parts") or {}).values())
+            # The two videos, same rule as the stems: the name comes from our
+            # own status file, never from the URL.
+            for key in ("with_voice", "no_voice"):
+                name = (st.get("videos") or {}).get(key)
+                if name:
+                    allowed.add(name)
             # words.json only becomes servable once the status says it was
             # written. Adding it as a blanket exception would let any job id
             # fish for a file the worker never made.
@@ -441,14 +448,69 @@ class Handler(BaseHTTPRequestHandler):
                 if studio.fetch_s3(jid, wanted, f) is None:
                     self._send(404, b"no", "text/plain")
                     return
-            body = f.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "audio/mpeg")
-            self.send_header("Content-Length", str(len(body)))
+            # Type by suffix, not a hardcoded audio/mpeg. A video served as
+            # audio/mpeg does not play in a <video> tag -- it downloads, or it
+            # shows a broken player, which looks exactly like the encode having
+            # failed. And `attachment` on a video means a phone can never
+            # simply press play, so mp4 is served inline.
+            ctype, disp = "audio/mpeg", "attachment"
+            if wanted.endswith(".mp4"):
+                ctype, disp = "video/mp4", "inline"
+            elif wanted.endswith(".json"):
+                ctype = "application/json"
+            elif wanted.endswith(".srt"):
+                ctype = "text/plain; charset=utf-8"
+
+            # STREAMED, and ranges are real rather than advertised.
+            #
+            # `f.read_bytes()` was fine for a 5 MB stem and is not fine for a
+            # 90 MB video on a 1.8 GB box serving requests concurrently. This
+            # file already carries the measurement that motivated streaming the
+            # UPLOAD path -- 83 MB of RSS for a 24 MB file -- and the download
+            # path was still reading whole files in. Both siblings, one screen.
+            #
+            # And `Accept-Ranges: bytes` is a promise. A phone scrubbing a video
+            # sends `Range:`, and answering 200-with-everything to a range
+            # request is how a seek turns into a 90 MB refetch.
+            size = f.stat().st_size
+            start, end = 0, size - 1
+            rng = self.headers.get("Range", "")
+            partial = False
+            if rng.startswith("bytes=") and "," not in rng:
+                a, _, b = rng[6:].partition("-")
+                try:
+                    if a:
+                        start = int(a)
+                        end = int(b) if b else size - 1
+                    elif b:                      # bytes=-500, the last 500
+                        start = max(0, size - int(b))
+                    partial = 0 <= start <= end < size
+                except ValueError:
+                    partial = False
+                if not partial:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Content-Disposition",
-                             f'attachment; filename="{wanted}"')
+                             f'{disp}; filename="{wanted}"')
             self.end_headers()
-            self.wfile.write(body)
+            remaining = end - start + 1
+            with f.open("rb") as fh:
+                fh.seek(start)
+                while remaining > 0:
+                    chunk = fh.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
             return
         if self.path in ("/measure", "/measure/"):
             # str.replace, not %-formatting: the stylesheet contains `100%`
@@ -510,10 +572,37 @@ class Handler(BaseHTTPRequestHandler):
 
             def pull():
                 try:
-                    got = ytfetch.grab(url, staged.parent)
+                    # The PICTURE, not just the sound. These archive URLs offer
+                    # one progressive format, so the old audio-only call was
+                    # downloading exactly these bytes and discarding the video
+                    # half. The audio is then extracted locally rather than
+                    # fetched twice.
+                    vid = None
+                    try:
+                        vid = ytfetch.grab_video(url, staged.parent)
+                        audio = staged.parent / "audio.mp3"
+                        subprocess.run(
+                            ["ffmpeg", "-nostdin", "-v", "error", "-y",
+                             "-i", str(vid), "-vn", "-c:a", "libmp3lame",
+                             "-b:a", "192k", str(audio)],
+                            check=True, timeout=1800)
+                        got = audio
+                    except Exception as e:                        # noqa: BLE001
+                        # Video is the upgrade, stems are the floor. If the
+                        # capture has no usable picture, still give somebody
+                        # their stems rather than nothing at all.
+                        traceback.print_exc()
+                        print(f"job {jid}: no video ({e}); audio only", flush=True)
+                        vid = None
+                        got = ytfetch.grab(url, staged.parent)
+
+                    # Passed IN, never patched in afterwards: adopt() queues the
+                    # job on its last line, so writing job.json after it returns
+                    # races the worker reading it.
                     studio.adopt(jid, got, f"{found.title}.mp3", [],
                                  __import__("earshot.separate",
-                                            fromlist=["x"]).SIX)
+                                            fromlist=["x"]).SIX,
+                                 extra={"video": vid.name} if vid else None)
                 except Exception as e:                            # noqa: BLE001
                     traceback.print_exc()
                     studio.write_status(jid, state="failed",

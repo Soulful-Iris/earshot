@@ -128,8 +128,16 @@ def new_job(data: bytes, filename: str, parts: list[str], model: str) -> Job:
     return adopt(jid, src, filename, parts, model)
 
 
-def adopt(jid: str, src: Path, filename: str, parts: list[str], model: str) -> Job:
-    """Turn a file already on disk into a queued job."""
+def adopt(jid: str, src: Path, filename: str, parts: list[str], model: str,
+          extra: dict | None = None) -> Job:
+    """Turn a file already on disk into a queued job.
+
+    `extra` is merged into job.json BEFORE the job is queued, and that ordering
+    is the whole reason the argument exists rather than the caller patching the
+    file afterwards. `adopt` starts the pump on the last line, so a caller that
+    writes to job.json after it returns is racing the worker for the same file,
+    and the losing side of that race is a job that quietly produces no video.
+    """
     from . import decode, separate
 
     d = JOBS / jid
@@ -151,9 +159,10 @@ def adopt(jid: str, src: Path, filename: str, parts: list[str], model: str) -> J
         raise Refused(f"that is {media.duration/60:.1f} minutes; "
                       f"the limit here is {MAX_MINUTES:.0f}")
 
-    (d / "job.json").write_text(json.dumps({
-        "source": src.name, "parts": parts, "model": model,
-        "filename": filename, "created": time.time()}))
+    spec = {"source": src.name, "parts": parts, "model": model,
+            "filename": filename, "created": time.time()}
+    spec.update(extra or {})
+    (d / "job.json").write_text(json.dumps(spec))
     job = Job(jid, d)
     with _lock:
         _queue.append(jid)

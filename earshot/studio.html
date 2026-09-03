@@ -62,6 +62,14 @@
                padding:.8rem .85rem;font:inherit}
  .urlrow input:focus{outline:none;border-color:#c8a24a}
  .urlrow button{width:auto;flex:0 0 auto;margin-top:0;padding:.8rem 1.4rem}
+ .vid{border-top:1px solid #1e222a;padding:.85rem 0}
+ .vid .top{display:flex;align-items:baseline;gap:.6rem}
+ .vid .n{font-weight:600;font-size:1.05rem}
+ .vid .d{color:#7d848c;font-size:.85rem;margin-bottom:.5rem}
+ /* max-width, not width: a 360p capture blown up to the column width is
+    softer than the source and looks like the tool degraded it. */
+ .vid video{width:100%;max-width:100%;border-radius:8px;background:#000;
+            display:block;margin-bottom:.4rem}
  .words{border-top:1px solid #1e222a;padding:.9rem 0 .2rem}
  .words .hd{font-weight:600;font-size:1.05rem}
  .words .meta{color:#7d848c;font:12.5px ui-monospace,monospace;margin-top:.2rem}
@@ -254,6 +262,12 @@ async function poll() {
     $('#progress').textContent = d.ahead
       ? `waiting, ${d.ahead} job${d.ahead>1?'s':''} ahead`
       : 'starting…';
+  } else if (d.state === 'working' && d.stage) {
+    // Past the separation and into the videos. There is no percentage for this
+    // one, so it says what it is doing rather than leaving a bar at 100% for a
+    // minute, which reads as finished-but-stuck.
+    $('#fill').style.width = '100%';
+    $('#progress').textContent = d.stage;
   } else if (d.state === 'working') {
     const pct = d.total_seconds ? Math.min(100, 100*d.done_seconds/d.total_seconds) : 0;
     $('#fill').style.width = pct + '%';
@@ -271,7 +285,38 @@ async function poll() {
     const order = ['vocals', 'band', 'drums', 'bass', 'guitar', 'piano', 'other'];
     const label = n => n === 'band' ? (v.band_means || 'everything but the voice')
                      : n === 'vocals' ? 'voice' : n;
-    const rows = order.filter(n => d.found && d.found[n]).map(n => {
+    // The videos come FIRST when there are any, because for a link they are
+    // the thing that was asked for and the stems are the workings. A page that
+    // opens with seven audio files and hides the video below them is the
+    // ingredients-instead-of-the-dish mistake all over again, in CSS.
+    const rows = [];
+    const V = d.videos;
+    if (V && V.with_voice) {
+      const one = (file, title, sub) => `<div class=vid>
+        <div class=top><span class=n>${title}</span></div>
+        <div class=d>${sub}</div>
+        <video controls playsinline preload=metadata
+               src="/jobs/${jobId}/${file}"></video>
+        <a class=dl href="/jobs/${jobId}/${file}" download>Download</a></div>`;
+      rows.push(one(V.with_voice, 'With the voice',
+                    'the original, subtitled'));
+      if (V.no_voice) rows.push(one(V.no_voice, 'Without the voice',
+                    'sing this one'));
+      if (V.subtitles) {
+        rows.push(`<div class=note>Subtitles are burned in
+          ${V.cues ? '(' + V.cues + ' lines)' : ''}, read off the isolated
+          vocal, so the timing is the recording's own.</div>`);
+      } else if (V.why_no_subtitles) {
+        // Says which of the two videos exist and that they are fine, because
+        // "no subtitles" on its own reads as "the whole thing failed".
+        rows.push(`<div class=note>No subtitles on these:
+          ${V.why_no_subtitles}. The videos themselves are fine.</div>`);
+      }
+    } else if (V && V.why) {
+      rows.push(`<div class=note>The videos did not build (${V.why}).
+        The stems below are unaffected.</div>`);
+    }
+    rows.push(...order.filter(n => d.found && d.found[n]).map(n => {
       const f = d.found[n];
       const lvl = (f.db === null || f.db === undefined) ? 'silent' : f.db + ' dB';
       if (f.status === 'absent') return `<div class="stem gone">
@@ -285,7 +330,7 @@ async function poll() {
         <audio controls preload=metadata src="/jobs/${jobId}/${f.file}"></audio>
         <a class=dl href="/jobs/${jobId}/${f.file}" download>Download ${label(n)}</a>
         </div>`;
-    });
+    }));
     // The words, when they came back. Read off the isolated vocal, so the
     // timing is the real timing. `unsure` is shown rather than hidden: a
     // highlighter landing on the wrong syllable is worse than none, and the

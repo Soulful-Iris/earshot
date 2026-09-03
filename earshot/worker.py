@@ -160,8 +160,50 @@ def main(argv: list[str] | None = None) -> int:
         gc.collect()
 
         verdict = separate.classify(levels)
+
+        # --- the two videos --------------------------------------------------
+        # Bruno, 2026-09-03: "2 videos. One with voice. One without. Both
+        # subtitled". Stems and a words.json are the ingredients; this is the
+        # dish, and until now the job stopped one step short of it.
+        #
+        # Only when a picture came with the sound, which today means a link
+        # rather than an upload. A plain mp3 upload behaves exactly as before.
+        #
+        # NOT allowed to fail the job. If ffmpeg has a bad day the seven stems
+        # are still on disk and still worth having; a post-step that turns
+        # finished work into a failure is the exact bug that ate the first real
+        # song anybody put through this.
+        videos = None
+        src_video = spec.get("video")
+        if src_video and (job / src_video).is_file():
+            try:
+                from . import video as _video
+                write_status(job, state="working", stage="videos",
+                             parts=made, levels=levels, verdict=verdict,
+                             lyrics=lyrics)
+                usable = (lyrics or {}).get("timings_usable")
+                lyr_obj = None
+                wjson = job / "out" / "words.json"
+                if wjson.is_file():
+                    from . import words as _words
+                    lyr_obj = _words.load(wjson)
+                videos = _video.make(
+                    job / "out", job / src_video,
+                    job / "out" / (made.get("band") or ""),
+                    lyr_obj, usable,
+                    on_note=lambda m: write_status(job, stage=m))
+                print(f"job {job.name}: videos {videos}", flush=True)
+            except Exception as e:                                # noqa: BLE001
+                traceback.print_exc()
+                videos = {"why": f"{type(e).__name__}: {e}"[:200]}
+            finally:
+                # The download is 180 MB for a four-minute video and both
+                # renders are finished with it. Keeping it would fill the disk
+                # a job at a time.
+                (job / src_video).unlink(missing_ok=True)
+
         write_status(job, state="done", parts=made, levels=levels,
-                     verdict=verdict, lyrics=lyrics,
+                     verdict=verdict, lyrics=lyrics, videos=videos, stage=None,
                      elapsed=round(time.time() - started, 1))
 
         # Everything past this point is delivery, and NONE of it may turn a
@@ -174,6 +216,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             kept = [n for n, f in made.items()
                     if studio.put_s3(job.name, job / "out" / f)]
+            # The videos go up too. The page promises "kept in S3, this link
+            # keeps working", and a link that returns the stems tomorrow but
+            # 404s on the thing he actually wanted is the promise broken in the
+            # least visible way.
+            for key in ("with_voice", "no_voice"):
+                fname = (videos or {}).get(key)
+                if fname and (job / "out" / fname).is_file():
+                    if studio.put_s3(job.name, job / "out" / fname):
+                        kept.append(key)
             write_status(job, kept=sorted(kept))
             print(f"job {job.name}: {len(kept)}/{len(made)} stems in S3", flush=True)
         except Exception as e:                               # noqa: BLE001

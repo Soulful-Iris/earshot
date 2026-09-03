@@ -153,6 +153,17 @@ def save(lyrics: Lyrics, path: str | Path) -> Path:
     return p
 
 
+def load(path: str | Path) -> Lyrics:
+    """Read back what `save` wrote, so a video can be rebuilt without paying
+    for the transcription again."""
+    d = json.loads(Path(path).read_text())
+    ws = [Word(w["word"], float(w["start"]), float(w["end"]),
+               float(w.get("confidence", 0.0))) for w in d.get("words") or []]
+    return Lyrics(words=ws, language=d.get("language"),
+                  mean_confidence=float(d.get("mean_confidence") or 0.0),
+                  unsure=int(d.get("unsure") or 0))
+
+
 # --- does the transcript actually line up with the singing? ------------------
 #
 # The reason this exists, 2026-09-03. A job came back with 119 words at 0.71

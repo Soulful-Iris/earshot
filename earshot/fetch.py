@@ -107,6 +107,36 @@ def probe(url: str, timeout: int = 120) -> Found:
     )
 
 
+# NOT a format id. The first version of grab_video said `-f 37`, because that is
+# what the probe reported for the video I tested it on. The second real video
+# was fmt 18 (640x360) and it failed outright with "Requested format is not
+# available" -- one for one, on a sample of two. Archive captures carry whatever
+# the crawler happened to take, so ask for the property, never the number.
+VIDEO_FORMAT = "best[vcodec!=none][acodec!=none]/best"
+
+
+def grab_video(url: str, into: Path, timeout: int = 1800) -> Path:
+    """Download the picture as well as the sound.
+
+    This costs NOTHING extra and that is worth writing down. These archive URLs
+    offer a single progressive format, so `-f bestaudio/best -x` in `grab` was
+    already pulling the whole video down and then throwing the picture away.
+    Keeping it is the same bytes.
+    """
+    into = Path(into)
+    into.mkdir(parents=True, exist_ok=True)
+    vid = video_id(url)
+    out = into / f"{vid}.video.%(ext)s"
+    r = _ytdlp(["-f", VIDEO_FORMAT, "-o", str(out), WAYBACK.format(vid=vid)],
+               timeout)
+    got = [p for p in sorted(into.glob(f"{vid}.video.*"))
+           if p.suffix in (".mp4", ".webm", ".mkv")]
+    if not got:
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        raise NotArchived("no video downloaded: " + (err[-1] if err else "no output"))
+    return got[0]
+
+
 def grab(url: str, into: Path, seconds: float | None = None,
          timeout: int = 900) -> Path:
     """Download the audio to `into`, optionally only the first `seconds`.
