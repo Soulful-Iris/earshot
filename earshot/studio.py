@@ -26,6 +26,7 @@ realtime, a spinner would be a lie for ten minutes at a stretch.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import subprocess
@@ -81,6 +82,32 @@ def staging_path(filename: str) -> tuple[str, Path]:
     (d / "out").mkdir(parents=True, exist_ok=True)
     suffix = Path(filename).suffix.lower()[:6] or ".mp3"
     return jid, d / f"source{suffix}"
+
+
+def write_status(jid: str, **fields) -> None:
+    """Atomic merge into a job's status.json.
+
+    The worker has its own copy of this taking a Path. This one takes a job id
+    because the server needs to write a status BEFORE there is a job - a link
+    that is still downloading has to be pollable, and "no status file yet" is
+    indistinguishable from "queued" to the page.
+
+    Same atomic replace, for the same reason: the web process reads this file
+    while it is being written.
+    """
+    d = JOBS / jid
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "status.json"
+    current = {}
+    if path.exists():
+        try:
+            current = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            current = {}
+    current.update(fields)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(current))
+    os.replace(tmp, path)
 
 
 def abandon(jid: str) -> None:

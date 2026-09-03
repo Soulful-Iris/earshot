@@ -54,6 +54,17 @@
  .saved a:last-child{border-bottom:1px solid #1e222a}
  .saved .nm{font-weight:600}
  .saved .k{color:#7d848c;font-size:.85rem;display:block}
+ /* flex-wrap, because at 390px an input and a button side by side is about
+    460px of content and the button is the one that falls off. */
+ .urlrow{display:flex;gap:.5rem;flex-wrap:wrap}
+ .urlrow input{flex:1 1 14rem;min-width:0;background:#12151a;color:inherit;
+               border:1.5px solid #2f3540;border-radius:.5rem;
+               padding:.8rem .85rem;font:inherit}
+ .urlrow input:focus{outline:none;border-color:#c8a24a}
+ .urlrow button{width:auto;flex:0 0 auto;margin-top:0;padding:.8rem 1.4rem}
+ .words{border-top:1px solid #1e222a;padding:.9rem 0 .2rem}
+ .words .hd{font-weight:600;font-size:1.05rem}
+ .words .meta{color:#7d848c;font:12.5px ui-monospace,monospace;margin-top:.2rem}
 </style>
 <main>
 <h1>earshot</h1>
@@ -64,6 +75,17 @@
   <span>or drop one here &mdash; any audio or video, under __MAX_MB__ MB and __MAX_MIN__ minutes</span>
   <input id=file type=file>
 </label>
+
+<p class=note style="text-align:center;margin:.9rem 0 .5rem">or paste a link</p>
+<div class=urlrow>
+  <input id=url type=url autocomplete=off spellcheck=false
+         placeholder="https://www.youtube.com/watch?v=...">
+  <button id=golink>Fetch</button>
+</div>
+<p class=note id=urlnote style="margin:.45rem 0 0">Fetched through the Internet
+Archive, because this machine cannot reach YouTube directly. It only works for
+videos the archive kept a copy of, and it checks before downloading so you find
+out in two seconds rather than after the wait.</p>
 
 <button id=go disabled>Pull it apart</button>
 <p class=note style="margin-top:.6rem">Everything the model can find is
@@ -190,12 +212,45 @@ $('#go').onclick = async () => {
   poll();
 };
 
+$('#golink').onclick = async () => {
+  const url = $('#url').value.trim();
+  if (!url) return;
+  $('#golink').disabled = true; $('#error').hidden = true;
+  $('#result').hidden = true; $('#running').hidden = false;
+  $('#progress').textContent = 'checking the archive…';
+
+  let d;
+  try {
+    d = await (await fetch('/jobs/from-url', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url})
+    })).json();
+  } catch (e) {
+    $('#golink').disabled = false;
+    return fail('could not reach the server: ' + e);
+  }
+  $('#golink').disabled = false;
+  // A 404 here means the archive has no copy. That is an answer, not a
+  // breakage, and the message from the server says which.
+  if (!d.ok) return fail(d.why || 'that link did not work');
+  jobId = d.id;
+  remember(jobId, d.title || url);
+  poll();
+};
+
 async function poll() {
   let d;
   try { d = await (await fetch('/jobs/' + jobId)).json(); }
   catch (e) { return setTimeout(poll, 4000); }
 
-  if (d.state === 'queued') {
+  if (d.state === 'fetching') {
+    // Downloading from the archive. Minutes, not seconds, and there is no
+    // percentage to show, so say what it is doing rather than fake a bar.
+    $('#progress').textContent = d.title
+      ? `fetching “${d.title}” from the archive…`
+      : 'fetching from the archive…';
+  } else if (d.state === 'queued') {
     $('#progress').textContent = d.ahead
       ? `waiting, ${d.ahead} job${d.ahead>1?'s':''} ahead`
       : 'starting…';
@@ -231,6 +286,24 @@ async function poll() {
         <a class=dl href="/jobs/${jobId}/${f.file}" download>Download ${label(n)}</a>
         </div>`;
     });
+    // The words, when they came back. Read off the isolated vocal, so the
+    // timing is the real timing. `unsure` is shown rather than hidden: a
+    // highlighter landing on the wrong syllable is worse than none, and the
+    // person singing deserves to know how much to trust it.
+    const L = d.lyrics;
+    if (L && L.count) {
+      rows.push(`<div class=words>
+        <div class=hd>Words, timed</div>
+        <div class=meta>${L.count} words${L.language ? ', ' + L.language : ''}
+          · confidence ${L.confidence}${L.unsure ? ' · ' + L.unsure + ' unsure' : ''}</div>
+        <a class=dl href="/jobs/${jobId}/${L.file}" download>Download the timings</a>
+        </div>`);
+    } else if (L) {
+      rows.push(`<div class=words>
+        <div class=hd>No words</div>
+        <div class=meta>the singing could not be read, so there is no
+          highlighter. The stems above are unaffected.</div></div>`);
+    }
     $('#stems').innerHTML = rows.join('');
     $('#foot').textContent =
       `took ${Math.round(d.elapsed)}s. kept in S3 — this link keeps working: `

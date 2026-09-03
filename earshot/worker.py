@@ -126,9 +126,36 @@ def main(argv: list[str] | None = None) -> int:
             path.unlink(missing_ok=True)
             made[name] = mp3.name
 
+        # --- the words, for singing along -----------------------------------
+        # Read off the ISOLATED VOCAL, which is why no lyrics database is
+        # needed and why the timing is the real timing rather than a guess at
+        # where the lines fall.
+        #
+        # Wrapped, and never able to fail the job. Same rule as delivery below:
+        # the stems are the product, the highlighter is the extra. Some singing
+        # genuinely cannot be transcribed and that is an answer, not an error.
+        #
+        # It reads the finished mp3 (~5 MB for a four-minute vocal), not the wav
+        # and not into an array. The last post-step added here read whole files
+        # in beside a 1.3 GB model and got a job killed two seconds from the end.
+        lyrics = None
+        try:
+            vocal = job / "out" / (made.get("vocals") or "")
+            if vocal.is_file():
+                from . import words as _words
+                lyr = _words.read_vocal(vocal)
+                _words.save(lyr, job / "out" / "words.json")
+                lyrics = {"count": len(lyr.words), "language": lyr.language,
+                          "confidence": round(lyr.mean_confidence, 2),
+                          "unsure": lyr.unsure, "file": "words.json"}
+        except Exception as e:                                    # noqa: BLE001
+            lyrics = {"count": 0, "why": str(e)[:200]}
+        gc.collect()
+
         verdict = separate.classify(levels)
         write_status(job, state="done", parts=made, levels=levels,
-                     verdict=verdict, elapsed=round(time.time() - started, 1))
+                     verdict=verdict, lyrics=lyrics,
+                     elapsed=round(time.time() - started, 1))
 
         # Everything past this point is delivery, and NONE of it may turn a
         # finished job back into a failed one. The stems exist and the status

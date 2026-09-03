@@ -423,7 +423,13 @@ class Handler(BaseHTTPRequestHandler):
             # A stem download. The name is taken from our own status file, never
             # from the URL, so no path from outside chooses what gets served.
             wanted = rest[1]
-            allowed = set((studio.Job(jid, d).status.get("parts") or {}).values())
+            st = studio.Job(jid, d).status
+            allowed = set((st.get("parts") or {}).values())
+            # words.json only becomes servable once the status says it was
+            # written. Adding it as a blanket exception would let any job id
+            # fish for a file the worker never made.
+            if (st.get("lyrics") or {}).get("file"):
+                allowed.add(st["lyrics"]["file"])
             if wanted not in allowed:
                 self._send(404, b"no", "text/plain")
                 return
@@ -460,6 +466,62 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
+
+        # --- a link instead of a file ---------------------------------------
+        # This box cannot reach YouTube (measured: seven yt-dlp player clients,
+        # two videos, all "Sign in to confirm you're not a bot"). The Wayback
+        # Machine has archived media for a lot of videos and yt-dlp has a
+        # dedicated extractor for it, which is the route Bruno pointed at.
+        #
+        # PROBE is synchronous because it takes two seconds and answers "is this
+        # even available", which somebody deserves before they wait. The
+        # DOWNLOAD is not, because it is minutes, so it runs behind a status the
+        # page already knows how to poll.
+        if self.path == "/jobs/from-url":
+            from . import fetch as ytfetch
+            raw = self.rfile.read(min(length, 4096))
+            try:
+                url = (json.loads(raw or b"{}").get("url") or "").strip()
+            except json.JSONDecodeError:
+                url = ""
+            try:
+                found = ytfetch.probe(url)
+            except ValueError as e:
+                self._json(400, {"ok": False, "why": str(e)})
+                return
+            except ytfetch.NotArchived as e:
+                self._json(404, {"ok": False, "why": str(e)})
+                return
+            except Exception:                                     # noqa: BLE001
+                traceback.print_exc()
+                self._json(502, {"ok": False,
+                                 "why": "could not reach the archive just now"})
+                return
+
+            if found.duration and found.duration > studio.MAX_MINUTES * 60:
+                self._json(400, {"ok": False,
+                                 "why": f"that is {found.duration/60:.0f} minutes; "
+                                        f"the limit here is {studio.MAX_MINUTES:.0f}"})
+                return
+
+            jid, staged = studio.staging_path("audio.mp3")
+            studio.write_status(jid, state="fetching", title=found.title,
+                                source=found.source, duration=found.duration)
+
+            def pull():
+                try:
+                    got = ytfetch.grab(url, staged.parent)
+                    studio.adopt(jid, got, f"{found.title}.mp3", [],
+                                 __import__("earshot.separate",
+                                            fromlist=["x"]).SIX)
+                except Exception as e:                            # noqa: BLE001
+                    traceback.print_exc()
+                    studio.write_status(jid, state="failed",
+                                        why=f"could not fetch: {e}"[:300])
+
+            threading.Thread(target=pull, daemon=True).start()
+            self._json(200, {"ok": True, "id": jid, "title": found.title})
+            return
 
         if self.path == "/jobs":
             if length > (studio.MAX_MB + 2) << 20:
