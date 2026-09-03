@@ -14,8 +14,14 @@ which is famously the most unintelligible vocal ever recorded. A second, clearly
 sung track returned 50 words with per-word start and end times at confidence
 0.96 to 1.00.
 
-So it works, and it fails honestly: some singing genuinely cannot be read, and
-this says so rather than inventing a line.
+TWO THINGS LEARNED SINCE, both by being wrong in public:
+
+1. `detect_language=true` returns NOTHING on sung vocals. The failure message
+   this file used to print blamed the singing, and that was false.
+2. A transcript can come back full and CONFIDENT with timings that are noise.
+   119 words at 0.71 confidence, and the clock was random. See `alignment()`
+   at the bottom - the recogniser's own confidence is it grading its own
+   homework, so the timings get checked against the audio instead.
 """
 from __future__ import annotations
 
@@ -145,3 +151,81 @@ def save(lyrics: Lyrics, path: str | Path) -> Path:
     p = Path(path)
     p.write_text(json.dumps(lyrics.as_dict(), indent=1))
     return p
+
+
+# --- does the transcript actually line up with the singing? ------------------
+#
+# The reason this exists, 2026-09-03. A job came back with 119 words at 0.71
+# confidence and I reported it to Bruno as "119 words timed across 247 seconds".
+# The count was real. The TIMINGS were noise - a highlighter driven by them
+# would have landed randomly - and nothing in the recogniser's own output said
+# so. Confidence is the recogniser grading its own homework.
+#
+# So this grades it against the audio instead: the vocal should be LOUD inside a
+# word span and QUIET in the gaps between words. Measured:
+#
+#     a track that genuinely worked   +11.7 dB
+#     the track I wrongly reported     -0.1 dB
+#
+# And the confound was checked before believing either: a stem with flat energy
+# could not show alignment even if the timings were perfect. The failing stem
+# has a 65 dB spread between its quiet and loud tenths of a second, so there was
+# plenty to line up with. It simply did not.
+
+ALIGNED_DB = 3.0   # below this the timings do not track the voice
+
+_SR = 16000
+
+
+def _mono(path) -> "object":
+    import numpy as np
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-ac", "1",
+         "-ar", str(_SR), "-f", "f32le", "-"],
+        capture_output=True, timeout=600).stdout
+    return np.frombuffer(raw, dtype=np.float32)
+
+
+def alignment(vocal_path, lyrics: Lyrics) -> float | None:
+    """dB by which the vocal is louder inside words than between them.
+
+    Positive and large means the timings track the singing. Near zero means the
+    words may be right and the CLOCK is wrong, which is the failure that looks
+    exactly like success from the transcript alone.
+
+    None when there is not enough to compare - too few words, or no real gaps -
+    because a number computed from two samples is worse than no number.
+    """
+    import numpy as np
+
+    if not lyrics.words:
+        return None
+
+    def db(a):
+        if a.size == 0:
+            return None
+        return 20 * np.log10(max(float(np.sqrt(np.mean(a.astype(np.float64) ** 2))), 1e-9))
+
+    v = _mono(vocal_path)
+    if v.size < _SR:
+        return None
+
+    inside, gaps, prev = [], [], 0.0
+    for w in lyrics.words:
+        if w.start > prev + 0.15:
+            gaps.append(v[int(prev * _SR):int(w.start * _SR)])
+        inside.append(v[int(w.start * _SR):int(w.end * _SR)])
+        prev = max(prev, w.end)
+
+    ins = [x for x in inside if x.size]
+    gap = [x for x in gaps if x.size]
+    if not ins or not gap:
+        return None
+    a, b = db(np.concatenate(ins)), db(np.concatenate(gap))
+    if a is None or b is None:
+        return None
+    # float(), not the numpy scalar. It survives arithmetic and comparison
+    # perfectly and then dies in json.dumps as "Object of type bool is not JSON
+    # serializable" - in the worker, at the very end, after the separation is
+    # already done. Exactly the shape of the post-step that ate a finished job.
+    return round(float(a) - float(b), 1)

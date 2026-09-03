@@ -291,11 +291,23 @@ async function poll() {
     // highlighter landing on the wrong syllable is worse than none, and the
     // person singing deserves to know how much to trust it.
     const L = d.lyrics;
-    if (L && L.count) {
+    if (L && L.count && L.timings_usable === false) {
+      // Words came back, and the CLOCK is wrong. This is the case that looks
+      // exactly like success from the transcript alone, and the one I reported
+      // as working before measuring it against the audio.
+      rows.push(`<div class=words>
+        <div class=hd>Words found, but the timing is off</div>
+        <div class=meta>${L.count} words came back, and they do not line up with
+          the singing (${L.alignment_db} dB, needs 3). A highlighter built on
+          these would land in the wrong places, so it is not offered.</div>
+        <a class=dl href="/jobs/${jobId}/${L.file}" download>Download them anyway</a>
+        </div>`);
+    } else if (L && L.count) {
       rows.push(`<div class=words>
         <div class=hd>Words, timed</div>
         <div class=meta>${L.count} words${L.language ? ', ' + L.language : ''}
-          · confidence ${L.confidence}${L.unsure ? ' · ' + L.unsure + ' unsure' : ''}</div>
+          · confidence ${L.confidence}${L.unsure ? ' · ' + L.unsure + ' unsure' : ''}${
+          L.alignment_db != null ? ' · lines up at ' + L.alignment_db + ' dB' : ''}</div>
         <a class=dl href="/jobs/${jobId}/${L.file}" download>Download the timings</a>
         </div>`);
     } else if (L) {

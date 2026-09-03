@@ -145,9 +145,16 @@ def main(argv: list[str] | None = None) -> int:
                 from . import words as _words
                 lyr = _words.read_vocal(vocal)
                 _words.save(lyr, job / "out" / "words.json")
+                # Checked against the AUDIO, not against the recogniser's own
+                # confidence. A full, confident transcript whose clock is
+                # random looks identical to a good one from the JSON alone.
+                al = _words.alignment(vocal, lyr)
                 lyrics = {"count": len(lyr.words), "language": lyr.language,
                           "confidence": round(lyr.mean_confidence, 2),
-                          "unsure": lyr.unsure, "file": "words.json"}
+                          "unsure": lyr.unsure, "file": "words.json",
+                          "alignment_db": al,
+                          "timings_usable": None if al is None
+                                            else al >= _words.ALIGNED_DB}
         except Exception as e:                                    # noqa: BLE001
             lyrics = {"count": 0, "why": str(e)[:200]}
         gc.collect()

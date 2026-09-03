@@ -43,6 +43,35 @@ def test_the_failure_message_does_not_assert_a_cause():
             f"the failure message asserts {claim!r}, a cause it has not established"
 
 
+def test_alignment_returns_plain_json_safe_types():
+    """A numpy scalar survives arithmetic and comparison and dies in json.dumps.
+
+    It would have died in the WORKER, at the very end, after the separation was
+    already done - the exact shape of the post-step that ate a finished job
+    once already. Plain float, plain bool, or the status write fails.
+    """
+    import json
+    ws = [words.Word("a", 0.0, 0.4, 0.9), words.Word("b", 1.0, 1.4, 0.9)]
+    l = words.Lyrics(words=ws, language=None, mean_confidence=0.9, unsure=0)
+    payload = {"alignment_db": 4.2, "timings_usable": 4.2 >= words.ALIGNED_DB}
+    json.dumps(payload)          # must not raise
+    assert isinstance(payload["timings_usable"], bool)
+    assert l.at(0.2) == 0
+
+
+def test_a_confident_transcript_can_still_be_unusable():
+    """The failure this whole check exists for.
+
+    119 words at 0.71 confidence, and the clock was random. Nothing in the
+    recogniser's own output said so, because confidence is it grading its own
+    homework. Measured against the audio: -0.1 dB where a working track gives
+    +11.7. The threshold has to separate those two and nothing else matters.
+    """
+    assert words.ALIGNED_DB > 0.0
+    assert -0.1 < words.ALIGNED_DB <= 11.7, \
+        "the threshold must sit between the measured bad case and good case"
+
+
 def test_unsure_words_are_counted_not_hidden():
     ws = [words.Word("a", 0.0, 0.4, 0.99), words.Word("b", 0.4, 0.9, 0.20)]
     l = words.Lyrics(words=ws, language="en", mean_confidence=0.6,
