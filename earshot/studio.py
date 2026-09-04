@@ -454,9 +454,18 @@ def recent(limit: int = 12) -> list[dict]:
             continue
         if st.get("state") != "done":
             continue
+        # Name and kind ALONE are not enough to tell two jobs apart, and that
+        # is not a hypothetical. Bruno ran the same link twice, once before a
+        # fix and once after, and his projects list showed two rows reading
+        # "Metric - Black Sheep" / "music with a voice in it". He opened the
+        # older one, saw no subtitles, and asked whether he should redo the
+        # link. Nothing on screen could have told him which was which.
+        vid = st.get("videos") or {}
         out.append({"id": d.name, "name": spec.get("filename", "(unnamed)"),
                     "kind": (st.get("verdict") or {}).get("kind", ""),
-                    "created": spec.get("created", 0)})
+                    "created": spec.get("created", 0),
+                    "video": bool(vid.get("with_voice")),
+                    "subtitles": bool(vid.get("subtitles"))})
         if len(out) >= limit:
             break
     return out

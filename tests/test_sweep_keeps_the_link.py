@@ -107,3 +107,34 @@ def test_an_unfinished_job_directory_is_left_alone(tmp_path, monkeypatch):
     (d / "source.mp3").write_bytes(b"x" * 10)
     assert studio.sweep() == 0
     assert (d / "source.mp3").exists()
+
+
+def test_the_projects_list_can_tell_two_runs_of_the_same_link_apart(tmp_path, monkeypatch):
+    """Name and kind alone are not enough, and that is not hypothetical.
+
+    Bruno ran the same link twice, once before a fix and once after. His list
+    showed two rows reading "Metric - Black Sheep" / "music with a voice in
+    it". He opened the older one, saw no subtitles, and asked whether the
+    feature was broken and whether he should redo the link. Nothing on screen
+    could have told him which was which.
+    """
+    monkeypatch.setattr(studio, "JOBS", tmp_path)
+    for jid, subs, created in (("aaaaaaaaaaaa", False, 1000.0),
+                               ("bbbbbbbbbbbb", True, 2000.0)):
+        d = tmp_path / jid
+        (d / "out").mkdir(parents=True)
+        (d / "job.json").write_text(json.dumps(
+            {"source": "a.mp3", "filename": "same song.mp3", "created": created}))
+        (d / "status.json").write_text(json.dumps(
+            {"state": "done", "parts": {"vocals": "vocals.mp3"},
+             "verdict": {"kind": "music with a voice in it", "status": {}},
+             "videos": {"with_voice": "with-voice.mp4", "subtitles": subs}}))
+
+    rows = {j["id"]: j for j in studio.recent()}
+    assert rows["aaaaaaaaaaaa"]["name"] == rows["bbbbbbbbbbbb"]["name"]
+    assert rows["aaaaaaaaaaaa"]["kind"] == rows["bbbbbbbbbbbb"]["kind"]
+    # ...so something else has to differ, or the list is unusable.
+    assert rows["bbbbbbbbbbbb"]["subtitles"] is True
+    assert rows["aaaaaaaaaaaa"]["subtitles"] is False
+    assert rows["aaaaaaaaaaaa"]["created"] != rows["bbbbbbbbbbbb"]["created"]
+    assert all(r["video"] for r in rows.values())
