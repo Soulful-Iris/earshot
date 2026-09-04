@@ -183,6 +183,22 @@
  .door .peek em{font-style:normal;color:var(--gold)}
  .door .peek span{color:#fff;opacity:.55}
 
+ /* A still from the actual video, so "sing along" visibly has a picture in it
+    rather than being a word on a button. Same target as the button below it. */
+ .door button.shot{position:relative;display:block;width:100%;margin:var(--s-3) 0 0;
+      padding:0;border:0;background:#000;border-radius:var(--r-md);
+      overflow:hidden;cursor:pointer;line-height:0}
+ .door button.shot img{width:100%;display:block;opacity:.72;
+      transition:opacity .2s var(--ease),transform .3s var(--ease)}
+ .door button.shot:hover img{opacity:.92;transform:scale(1.02)}
+ .door button.shot .play{position:absolute;inset:0;margin:auto;
+      width:54px;height:54px;border-radius:50%;
+      background:rgba(12,14,18,.62);border:1.5px solid rgba(236,232,225,.75)}
+ .door button.shot .play::after{content:"";position:absolute;inset:0;margin:auto;
+      width:0;height:0;border-left:15px solid var(--ink);
+      border-top:9px solid transparent;border-bottom:9px solid transparent;
+      transform:translateX(2px)}
+
  /* max-width, not width: a 360p capture blown up to the column width is
     softer than the source and looks like the tool degraded it. */
  .door video{width:100%;max-width:100%;border-radius:var(--r-md);background:#000;
@@ -255,6 +271,41 @@
  .stage.karaoke .lyr .cur{font-size:clamp(1.7rem,7.5vw,2.6rem);margin:1rem 0}
  .stage.karaoke .lyr .prev,.stage.karaoke .lyr .next{
         font-size:clamp(1rem,4vw,1.3rem);opacity:.28;margin:.6rem 0}
+
+ /* The picture, ABOVE the words rather than behind them. Bruno: "So does the
+    video show during the singalong?" It did not; it was words on black and the
+    karaoke video was a download link.
+
+    ONE element carries both, and that is the point rather than a shortcut:
+    no-voice.mp4 is the same picture as the with-voice one -- render_picture()
+    encodes once and mux() muxes twice -- with the band as its audio. So the
+    <video> IS the backing track, and there is no second clock to drift.
+
+    THE FIRST VERSION PUT IT BEHIND, full-bleed, dimmed to 30%, and it was
+    wrong in a way only looking could show. The karaoke words are BURNED INTO
+    that picture; `object-fit:cover` crops a 640x360 source into a portrait
+    phone, which upscales those burned words to roughly twice the size of the
+    live ones and slices them off at both edges. Two sets of words in the same
+    space, fighting.
+
+    Contained and stacked instead: the frame keeps its own aspect and its own
+    small burned words read as part of the picture, and the big legible ones
+    live underneath in their own space. Nothing overlaps. */
+ .stage.karaoke .back{width:100%;max-width:44rem;max-height:34vh;
+        object-fit:contain;background:#000;border-radius:var(--r-md);
+        display:block;flex:0 0 auto}
+ /* Picture pinned to the top, words centred in whatever is left. Without this
+    the lyric sat directly under the video with the bottom half of the phone
+    empty, so the line you are singing was nowhere near the middle of the
+    screen you are looking at. */
+ .stage.karaoke .mid{justify-content:flex-start;padding-top:.8rem;gap:.7rem}
+ .stage.karaoke #stagebody{flex:1 1 auto;min-height:0;gap:.7rem}
+ .stage.karaoke .lyr{flex:1 1 auto;display:flex;flex-direction:column;
+        justify-content:center;min-height:0}
+ .stage.karaoke .lyr .ln{text-shadow:0 2px 18px rgba(0,0,0,.85)}
+ /* Shorter phones give the picture less and the words more; the words are the
+    part you cannot sing without. */
+ @media (max-height:700px){.stage.karaoke .back{max-height:26vh}}
  .stage .transport{display:flex;align-items:center;gap:var(--s-3);
                    margin-top:.6rem}
  .stage .transport button{width:auto;margin:0;flex:0 0 auto;
@@ -879,12 +930,22 @@ function karaokeDoor(d, V) {
       <div class=s>${why}.${V.no_voice ? ' The backing video is still here.' : ''}</div>
       ${dl ? `<div class=cta>${dl}</div>` : ''}</div>`;
   }
+  const withVideo = !!V.no_voice;
+  // The still shows the words already, so the text preview only earns its place
+  // when there is no picture to show. Two copies of the same line, stacked, was
+  // the first version.
   return `<div class=door><div class=k>Sing along</div>
-    <div class=t>Just the words and the band</div>
-    <div class=s>No microphone, no recording, nothing scored. The singer is
-      taken out, the words fill the screen and wipe as they are sung, and you
-      can pause it whenever you like.</div>
-    <div class=peek id=peek><span>&hellip;</span></div>
+    <div class=t>${withVideo ? 'The video, with the singer taken out'
+                             : 'Just the words and the band'}</div>
+    <div class=s>No microphone, no recording, nothing scored.
+      ${withVideo
+        ? 'The picture plays above the words, and they wipe as they are sung'
+        : 'The words fill the screen and wipe as they are sung'}, and you can
+      pause whenever you like.</div>
+    ${withVideo ? `<button class=shot id=karaokeshot aria-label="Sing along">
+        <img src="/jobs/${jobId}/poster.jpg" alt="">
+        <span class=play></span></button>`
+                : '<div class=peek id=peek><span>&hellip;</span></div>'}
     <div class=cta><button class=go id=karaokego>Sing along</button>${dl}</div>
     </div>`;
 }
@@ -929,6 +990,8 @@ async function wireKaraoke(d) {
   const go = document.getElementById('karaokego');
   if (!go) return;
   go.onclick = () => openKaraoke(d);
+  const shot = document.getElementById('karaokeshot');
+  if (shot) shot.onclick = () => openKaraoke(d);
   // Fill the preview with the song's real first line. A button labelled
   // "karaoke" says nothing about what arrives; the words in the colours they
   // will wipe in do.
@@ -959,7 +1022,31 @@ async function openKaraoke(d) {
       <span class=clock style="display:block"><span id=pclock>0:00</span></span>
     </div>`;
 
-  bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+  // The no-voice video when there is one, the band stem when there is not.
+  // A <video> and an <audio> both answer currentTime / duration / paused /
+  // play / pause, so everything downstream is the same code either way -- and
+  // using the video as the SOURCE rather than as decoration means the picture
+  // and the sound cannot drift, because they are one file.
+  const V = d.videos || {};
+  const old = document.getElementById('kback');
+  if (old) old.remove();
+  if (V.no_voice) {
+    const vid = document.createElement('video');
+    vid.className = 'back';
+    vid.id = 'kback';
+    vid.playsInline = true;
+    vid.setAttribute('playsinline', '');      // iOS wants the attribute too
+    vid.setAttribute('webkit-playsinline', '');
+    vid.preload = 'metadata';
+    vid.poster = `/jobs/${jobId}/poster.jpg`;
+    vid.src = `/jobs/${jobId}/${V.no_voice}`;
+    // Above the words, in the flow, not behind them. See the CSS.
+    const body = document.getElementById('stagebody');
+    body.insertBefore(vid, body.firstChild);
+    bandEl = vid;
+  } else {
+    bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+  }
   const btn = document.getElementById('kplay');
   const paint = () => { btn.textContent = bandEl && bandEl.paused ? 'Play' : 'Pause'; };
   bandEl.onended = () => { paint(); };
@@ -1204,6 +1291,11 @@ function stopSing() {
 function closeStage(hard) {
   const st = $stage();
   if (st) st.classList.remove('on', 'replaying', 'karaoke');
+  // The backdrop is created per open, so it has to go per close. Left in
+  // place it keeps its buffer, and the next open would insert a second one
+  // behind it, still holding the first one's decoded frames.
+  const back = document.getElementById('kback');
+  if (back) { back.pause(); back.removeAttribute('src'); back.load(); back.remove(); }
   if (replayAudio) { replayAudio.pause(); replayAudio = null; }
   if (stageRaf) { cancelAnimationFrame(stageRaf); stageRaf = null; }
   if (bandEl) { bandEl.pause(); bandEl = null; }
