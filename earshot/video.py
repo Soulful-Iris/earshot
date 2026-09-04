@@ -201,8 +201,18 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Sing,DejaVu Sans,{size},{SUNG},{TO_SING},&H000000,&H000000,-1,0,0,0,100,100,0,0,1,{outline},1,2,40,40,{round(height / 8)},1
 
 [Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, Effect, Text
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    # MarginV IS IN THAT LIST and leaving it out put a comma at the front of
+    # every single line. The Dialogue rows carry ten values; with only nine
+    # declared, libass shifted them and the spare comma was absorbed into the
+    # text. It renders as ",that guy on base" and reads as a typo in the lyric.
+    #
+    # It took three wrong theories to find, and all three were plausible: the
+    # lead-in tag, then a space inside a karaoke syllable, then an empty
+    # syllable being outlined. What settled it was rendering the same line four
+    # ways side by side, including one with no lead-in tag at all -- the comma
+    # was in that one too, which killed every theory about the tags at once.
     lines = []
     for c in cs:
         # A karaoke line has to APPEAR before its first word is sung, or the
@@ -219,10 +229,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, Effect, Text
             # rendered. \k is a duration in centiseconds, never a timestamp,
             # so every hundredth has to be spent somewhere.
             gap = int(round(max(0.0, w.start - prev) * 100))
-            if gap:
-                text += rf"{{\k{gap}}} "
-            elif text and not text.endswith(" "):
+            # The separator goes BEFORE the gap tag, never after it, and the
+            # lead-in gets no separator at all. libass draws an outline around
+            # every karaoke syllable including one that holds only a space, so
+            # `{\k25} ` at the head of a line renders as a small gold mark that
+            # reads exactly like a stray comma. It was on the front of every
+            # line for two renders before I zoomed in far enough to see what it
+            # was.
+            if text and not text.endswith(" ") and not text.endswith("}"):
                 text += " "
+            if gap:
+                text += rf"{{\k{gap}}}"
             text += rf"{{\k{max(1, int(round((w.end - w.start) * 100)))}}}{w.word}"
             prev = w.end
         lines.append(f"Dialogue: 0,{_ass_stamp(start)},{_ass_stamp(c.end)},"
@@ -351,6 +368,48 @@ def burn(video: Path, audio: Path | None, sub: Path | None, out: Path,
     return out
 
 
+def karaoke_landed(subbed: Path, at_cue: float, at_gap: float | None,
+                   ) -> tuple[bool, float, float]:
+    """Did the karaoke text reach the picture? Looks for its own colour.
+
+    THE COMPARISON THIS REPLACES was source-frame against output-frame, mean
+    absolute difference in the bottom strip, with the top strip as a control.
+    That worked on a clean talking-head clip and gave a FALSE NEGATIVE on the
+    first real music video: contrast 3.95 against a control of 1.96, so it
+    failed a 4x ratio bar while the subtitles were plainly on the screen. I
+    only knew because I rendered a frame and looked at it. The picture was dark
+    and grainy and the source-to-output scale and re-encode moved every pixel a
+    little, which is noise that has nothing to do with subtitles.
+
+    So this stops comparing two videos and looks for the one thing only the
+    subtitles can put there: SUNG is a specific gold that a burned karaoke line
+    contains by construction. Counted in the strip where subtitles live, at a
+    moment when a line is up, against the same strip at a moment when no line
+    is. Same video, same encoder, so there is nothing left for grain to explain.
+    """
+    import numpy as np
+
+    def gold(at: float) -> float:
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(subbed), "-ss", f"{at:.2f}",
+             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
+             "-vf", "scale=320:180", "-"],
+            capture_output=True, timeout=600, env=_env()).stdout
+        a = np.frombuffer(raw, dtype=np.uint8)
+        if a.size < 320 * 180 * 3:
+            return -1.0
+        a = a[:320 * 180 * 3].reshape(180, 320, 3).astype(np.int16)[110:, :, :]
+        hit = (a[:, :, 0] > 150) & (a[:, :, 1] > 120) & (a[:, :, 2] < 90)
+        return float(hit.mean() * 1000)          # per mille of the strip
+
+    on = gold(at_cue)
+    off = gold(at_gap) if at_gap is not None else 0.0
+    if on < 0:
+        return False, 0.0, 0.0
+    off = max(off, 0.0)
+    return (on > 1.0 and on > off * 3), round(on, 2), round(off, 2)
+
+
 def subs_landed(plain: Path, subbed: Path, at: float) -> tuple[bool, float, float]:
     """Did the words actually get burned in? Returns (yes, bottom, top).
 
@@ -467,12 +526,24 @@ def make(out_dir: Path, source: Path, band: Path | None, lyrics,
         # An EARLY cue on purpose: the comparison decodes to the timestamp
         # rather than seeking, so picking cue 3 rather than one four minutes in
         # is the difference between a second and a minute.
-        at = cs[min(2, len(cs) - 1)]
-        when = at.start + min(0.3, max(0.05, (at.end - at.start) / 2))
-        ok, bottom, top = subs_landed(source, with_voice, when)
+        # The BUSIEST of the early lines, not simply the third. A two-word cue
+        # puts very little gold on screen and the first run of this landed at
+        # 1.29 per mille against a floor of 1.0 -- a pass, and far too close to
+        # one. More words is more of the thing being looked for, and staying
+        # inside the first few keeps the decode short.
+        c = max(cs[:8], key=lambda x: len(x.words or []))
+        when = c.start + max(0.05, (c.end - c.start) / 2)
+        # And a moment with NO line up, to compare against. Without one the
+        # check has nothing to be a check against.
+        quiet = None
+        for a, b in zip(cs, cs[1:]):
+            if b.start - a.end > 3.0:
+                quiet = (a.end + b.start) / 2
+                break
+        ok, on, off = karaoke_landed(out_dir / WITH_VOICE, when, quiet)
         result["subtitles"] = bool(ok)
-        result["sub_contrast"] = bottom
-        result["sub_control"] = top
+        result["sub_gold"] = on
+        result["sub_gold_quiet"] = off
         if not ok:
             result["why_no_subtitles"] = (
                 "the subtitle track did not reach the picture; the videos are "

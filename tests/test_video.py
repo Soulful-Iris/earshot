@@ -286,3 +286,82 @@ def test_the_highlight_actually_moves_across_the_line(tmp_path):
     early, late = gold(1.4), gold(3.7)
     assert late > early * 1.5, (
         f"the highlight did not advance: {early} gold pixels early, {late} late")
+
+
+@needs_ffmpeg
+def test_the_karaoke_check_finds_its_own_colour_and_not_the_background(tmp_path):
+    """The replacement for a check that gave a false negative on real footage.
+
+    The old one compared source against output and needed the bottom strip to
+    move four times as much as the top. On a dark grainy music video the scale
+    and re-encode moved everything: 3.95 against a 1.96 control, so it reported
+    no subtitles over a picture that plainly had them. This looks for SUNG
+    itself, in the same video at two different moments, so grain has nothing
+    left to explain.
+    """
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+         "-i", "color=c=#141414:s=640x360:rate=10:duration=12",
+         # Grey noise, for two reasons. A pure black clip compresses to under
+         # render_picture's 10 KB sanity floor and is refused as a failed
+         # encode. And noise is the thing the OLD check could not tell from
+         # subtitles, so having it here means this one is measured against the
+         # exact confusion that broke its predecessor. Grey has no gold in it.
+         "-vf", "noise=alls=12:allf=t",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         str(src)], check=True, timeout=300)
+    ws = [W(w, 1.0 + i * 0.5, 1.4 + i * 0.5)
+          for i, w in enumerate("sing along with me now".split())]
+    sub = video.write_ass(video.cues(ws), tmp_path / "k.ass", 720)
+    out = video.render_picture(src, sub, tmp_path / "out.mp4")
+
+    ok, on, off = video.karaoke_landed(out, at_cue=2.0, at_gap=9.0)
+    assert ok, f"missed subtitles that are there (on={on} off={off})"
+    assert on > off * 3
+
+
+@needs_ffmpeg
+def test_the_karaoke_check_says_no_when_nothing_was_burned(tmp_path):
+    """The half that has to fail. A check only ever shown to say yes is not one."""
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+         "-i", "color=c=#141414:s=640x360:rate=10:duration=12",
+         # Grey noise, for two reasons. A pure black clip compresses to under
+         # render_picture's 10 KB sanity floor and is refused as a failed
+         # encode. And noise is the thing the OLD check could not tell from
+         # subtitles, so having it here means this one is measured against the
+         # exact confusion that broke its predecessor. Grey has no gold in it.
+         "-vf", "noise=alls=12:allf=t",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         str(src)], check=True, timeout=300)
+    plain = video.render_picture(src, None, tmp_path / "plain.mp4")
+    ok, on, off = video.karaoke_landed(plain, at_cue=2.0, at_gap=9.0)
+    assert not ok, f"claimed subtitles on a video with none (on={on})"
+
+
+def test_the_ass_header_declares_every_field_a_dialogue_row_carries():
+    """A comma at the front of every line, and three wrong theories to find it.
+
+    The Events Format line was missing MarginV, so nine fields were declared
+    for ten values, libass shifted them, and the spare comma ended up inside
+    the text: ",that guy on base". This counts them instead of trusting them.
+    """
+    out = video.ass(video.cues([W("that", 0.5, 0.9), W("guy", 0.9, 1.3)]), 720)
+    fmt = [l for l in out.splitlines()
+           if l.startswith("Format:") and "Layer" in l][0]
+    declared = len(fmt.split(":", 1)[1].split(","))
+    row = [l for l in out.splitlines() if l.startswith("Dialogue")][0]
+    values = len(row.split(":", 1)[1].split(","))
+    assert declared == values, (
+        f"{declared} fields declared, {values} written; the difference lands "
+        f"in the text as stray punctuation")
+    assert "MarginV" in fmt
+
+
+def test_no_line_begins_with_stray_punctuation_in_the_rendered_text():
+    out = video.ass(video.cues([W("that", 0.5, 0.9), W("guy", 0.9, 1.3)]), 720)
+    row = [l for l in out.splitlines() if l.startswith("Dialogue")][0]
+    text = row.split(",", 9)[-1]
+    assert not text.startswith(","), text
