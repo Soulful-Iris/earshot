@@ -291,21 +291,30 @@
     Contained and stacked instead: the frame keeps its own aspect and its own
     small burned words read as part of the picture, and the big legible ones
     live underneath in their own space. Nothing overlaps. */
- .stage.karaoke .back{width:100%;max-width:44rem;max-height:34vh;
+    Scoped to `.filmed`, not to `.karaoke`, because the RECORDING take wants
+    the identical treatment. Bruno: "Hav eyou checked if the video works now
+    when i record." It did not -- the picture was only in the sing-along -- and
+    the layout is the same problem either way. */
+ #stagefilm{width:100%;display:flex;justify-content:center;flex:0 0 auto}
+ #stagefilm:empty{display:none}
+ .stage.filmed .back{width:100%;max-width:44rem;max-height:34vh;
         object-fit:contain;background:#000;border-radius:var(--r-md);
         display:block;flex:0 0 auto}
  /* Picture pinned to the top, words centred in whatever is left. Without this
     the lyric sat directly under the video with the bottom half of the phone
     empty, so the line you are singing was nowhere near the middle of the
     screen you are looking at. */
- .stage.karaoke .mid{justify-content:flex-start;padding-top:.8rem;gap:.7rem}
- .stage.karaoke #stagebody{flex:1 1 auto;min-height:0;gap:.7rem}
- .stage.karaoke .lyr{flex:1 1 auto;display:flex;flex-direction:column;
+ .stage.filmed .mid{justify-content:flex-start;padding-top:.8rem;gap:.7rem}
+ .stage.filmed #stagebody{flex:1 1 auto;min-height:0;gap:.7rem}
+ .stage.filmed .lyr{flex:1 1 auto;display:flex;flex-direction:column;
         justify-content:center;min-height:0}
- .stage.karaoke .lyr .ln{text-shadow:0 2px 18px rgba(0,0,0,.85)}
+ .stage.filmed .lyr .ln{text-shadow:0 2px 18px rgba(0,0,0,.85)}
  /* Shorter phones give the picture less and the words more; the words are the
-    part you cannot sing without. */
- @media (max-height:700px){.stage.karaoke .back{max-height:26vh}}
+    part you cannot sing without. A take also has a meter and a Stop button
+    below it, so it gets less again. */
+ @media (max-height:700px){.stage.filmed .back{max-height:26vh}}
+ .stage.filmed.taking .back{max-height:26vh}
+ @media (max-height:700px){.stage.filmed.taking .back{max-height:20vh}}
  .stage .transport{display:flex;align-items:center;gap:var(--s-3);
                    margin-top:.6rem}
  .stage .transport button{width:auto;margin:0;flex:0 0 auto;
@@ -449,6 +458,11 @@ comes back below.</p>
     <button class=x id=stagex aria-label=close>&times;</button>
   </div>
   <div class=mid>
+    <!-- The picture lives OUTSIDE stagebody, which is rewritten wholesale at
+         every step of a take: ready room, count-in, singing, replay. A <video>
+         parked in there gets detached by the count-in and the take then plays
+         a fresh, unbuffered element. -->
+    <div id=stagefilm></div>
     <div id=stagebody></div>
   </div>
   <div class=foot id=stagefoot></div>
@@ -1007,6 +1021,64 @@ async function wireKaraoke(d) {
   }
 }
 
+// The no-voice video when there is one, the band stem when there is not.
+//
+// A <video> and an <audio> both answer currentTime / duration / paused / play
+// / pause, so everything downstream is the same code either way -- and using
+// the video as the SOURCE rather than as decoration means the picture and the
+// sound cannot drift, because they are one file.
+//
+// Shared by the sing-along and the recorded take. It was written for the
+// sing-along alone and then Bruno asked whether the picture shows when he
+// records, which it did not; one function is how the answer stays the same for
+// both rather than two places to remember.
+function makeBacking(d) {
+  const V = d.videos || {};
+  const old = document.getElementById('kback');
+  if (old) old.remove();
+  if (!V.no_voice) return new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+
+  const vid = document.createElement('video');
+  vid.className = 'back';
+  vid.id = 'kback';
+  vid.playsInline = true;
+  vid.setAttribute('playsinline', '');        // iOS wants the attribute too
+  vid.setAttribute('webkit-playsinline', '');
+  // auto, not metadata. A take starts with `await bandEl.play()` and only
+  // starts the RECORDER once that resolves, so an element with no data yet
+  // leaves the promise pending: count-in finishes, words never move, recorder
+  // never starts, and you sing three minutes into a frozen screen that looks
+  // exactly like a take in progress. Found by driving it; nothing threw.
+  vid.preload = 'auto';
+  vid.poster = `/jobs/${jobId}/poster.jpg`;
+  vid.src = `/jobs/${jobId}/${V.no_voice}`;
+  document.getElementById('stagefilm').appendChild(vid);
+  $stage().classList.add('filmed');
+  return vid;
+}
+
+// Take the picture out and let go of its buffer. Called from both the end of a
+// take and the close, because those are different exits and each used to leave
+// something behind.
+function clearFilm() {
+  const back = document.getElementById('kback');
+  if (back) { back.pause(); back.removeAttribute('src'); back.load(); back.remove(); }
+  const film = document.getElementById('stagefilm');
+  if (film) film.innerHTML = '';
+}
+
+// Play, but never wait forever. Returns true if it actually started.
+async function startPlaying(el, ms = 12000) {
+  let timer;
+  const bounded = new Promise(r => { timer = setTimeout(() => r(false), ms); });
+  try {
+    const ok = await Promise.race([el.play().then(() => true), bounded]);
+    return ok && !el.paused;
+  } catch (e) {
+    return false;
+  } finally { clearTimeout(timer); }
+}
+
 async function openKaraoke(d) {
   const st = $stage();
   document.getElementById('stagettl').textContent = d.title || 'sing along';
@@ -1022,31 +1094,7 @@ async function openKaraoke(d) {
       <span class=clock style="display:block"><span id=pclock>0:00</span></span>
     </div>`;
 
-  // The no-voice video when there is one, the band stem when there is not.
-  // A <video> and an <audio> both answer currentTime / duration / paused /
-  // play / pause, so everything downstream is the same code either way -- and
-  // using the video as the SOURCE rather than as decoration means the picture
-  // and the sound cannot drift, because they are one file.
-  const V = d.videos || {};
-  const old = document.getElementById('kback');
-  if (old) old.remove();
-  if (V.no_voice) {
-    const vid = document.createElement('video');
-    vid.className = 'back';
-    vid.id = 'kback';
-    vid.playsInline = true;
-    vid.setAttribute('playsinline', '');      // iOS wants the attribute too
-    vid.setAttribute('webkit-playsinline', '');
-    vid.preload = 'metadata';
-    vid.poster = `/jobs/${jobId}/poster.jpg`;
-    vid.src = `/jobs/${jobId}/${V.no_voice}`;
-    // Above the words, in the flow, not behind them. See the CSS.
-    const body = document.getElementById('stagebody');
-    body.insertBefore(vid, body.firstChild);
-    bandEl = vid;
-  } else {
-    bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
-  }
+  bandEl = makeBacking(d);
   const btn = document.getElementById('kplay');
   const paint = () => { btn.textContent = bandEl && bandEl.paused ? 'Play' : 'Pause'; };
   bandEl.onended = () => { paint(); };
@@ -1127,6 +1175,11 @@ async function openStage(d) {
   audioCtx.createMediaStreamSource(micStream).connect(analyser);
 
   renderReady(d);
+  // Made HERE, not at the top of the take, so it buffers while somebody is
+  // watching the meter move -- which is what the ready room is for. It also
+  // means they can see what they are about to sing to. It lives in #stagefilm
+  // and so survives the count-in rewriting the body underneath it.
+  bandEl = makeBacking(d);
   meterLoop();
 }
 
@@ -1192,9 +1245,10 @@ async function startTake(d) {
   mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
   mediaRec.onstop = () => uploadTake(micStream);
 
-  bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
-  bandEl.onended = () => stopSing();
-
+  // The body is written BEFORE the backing is made, because makeBacking()
+  // inserts the picture into it. Building the element first and then replacing
+  // innerHTML would drop it on the floor, silently, leaving an audio-only take
+  // that looks exactly like the old behaviour.
   document.getElementById('stagebody').innerHTML =
     `<div class=lyr id=lyr></div>`;
   document.getElementById('stagefoot').innerHTML = `
@@ -1203,11 +1257,32 @@ async function startTake(d) {
       <span id=pclock>0:00</span></div>
     <div class="meter small" id=meter></div>
     <button class=go id=stagestop>Stop</button>`;
+
+  $stage().classList.add('taking');
+  // Already made and buffering since the ready room. Only built here if
+  // something went round that path -- never a second element on top of one
+  // that is already holding the connection.
+  if (!bandEl) bandEl = makeBacking(d);
+  bandEl.onended = () => stopSing();
   document.getElementById('meter').innerHTML =
     Array.from({length: 40}, () => '<i></i>').join('');
   document.getElementById('stagestop').onclick = () => stopSing();
 
-  await bandEl.play();
+  // Bounded. The recorder deliberately does not start until the backing is
+  // actually running -- that is what makes the take aligned by construction --
+  // so an unbounded wait here is a take that never begins and never says so.
+  if (!await startPlaying(bandEl)) {
+    stageState = 'ready';
+    $stage().classList.remove('taking');
+    if (mediaRec && mediaRec.state === 'recording') { mediaRec.onstop = null; mediaRec.stop(); }
+    document.getElementById('stagebody').innerHTML =
+      `<div class=meta style="max-width:24rem">The backing would not start
+        playing, so there is nothing to sing against and no take was
+        recorded.</div>`;
+    document.getElementById('stagefoot').innerHTML =
+      `<button class=go onclick="closeStage(true)">Back</button>`;
+    return;
+  }
   mediaRec.start();
   singLoop();
 }
@@ -1282,6 +1357,12 @@ function paintLines(t) {
 function stopSing() {
   stageState = 'uploading';
   if (bandEl) { bandEl.pause(); bandEl = null; }
+  // The picture and its layout end with the take. It lives in #stagefilm, so
+  // overwriting stagebody below does NOT detach it any more -- it has to be
+  // taken out by hand, and the classes with it, or the replay lays its ribbon
+  // out under a film that is still on screen.
+  clearFilm();
+  $stage().classList.remove('filmed', 'taking');
   if (mediaRec && mediaRec.state === 'recording') mediaRec.stop();
   document.getElementById('stagebody').innerHTML =
     `<div class=cd style="font-size:2rem">that is a take</div>`;
@@ -1290,12 +1371,8 @@ function stopSing() {
 
 function closeStage(hard) {
   const st = $stage();
-  if (st) st.classList.remove('on', 'replaying', 'karaoke');
-  // The backdrop is created per open, so it has to go per close. Left in
-  // place it keeps its buffer, and the next open would insert a second one
-  // behind it, still holding the first one's decoded frames.
-  const back = document.getElementById('kback');
-  if (back) { back.pause(); back.removeAttribute('src'); back.load(); back.remove(); }
+  if (st) st.classList.remove('on', 'replaying', 'karaoke', 'filmed', 'taking');
+  clearFilm();
   if (replayAudio) { replayAudio.pause(); replayAudio = null; }
   if (stageRaf) { cancelAnimationFrame(stageRaf); stageRaf = null; }
   if (bandEl) { bandEl.pause(); bandEl = null; }

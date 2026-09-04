@@ -627,8 +627,128 @@ def _matchering(target: Path, reference: Path, out: Path) -> Path:
     return Path(out)
 
 
+# --- clarity ----------------------------------------------------------------
+#
+# Bruno, 2026-09-04: "can you put like a small clarity or whatever filter on
+# top of the song filter. Very small to smooth out the voice"
+#
+# "The song filter" is matchering, which pulls the take's colour and dynamics
+# toward the record's own vocal. ON TOP OF it is the correct place and he named
+# it: matchering matches toward a target curve, so anything applied BEFORE it
+# gets matched back out again.
+#
+# FOUR stages, and the count is four because it started at five and one of them
+# was measured doing nothing. Every remaining one is either clarity or
+# smoothing rather than taste, and every one has a number beside it, taken on
+# `fixtures/dry.wav` with the other stages switched off:
+#
+#   highpass 70 Hz    -4.4 dB at 40-90.  Rumble, most of it put there by the
+#                     room convolution. Much the biggest move in the chain, and
+#                     I had it filed as incidental cleanup until I measured it.
+#   -1 dB at 250 Hz   -0.8 dB at 180-400. Mud; taking it out reads as clarity
+#                     without adding any level.
+#   +1.5 dB at 3.2k   +1.25 dB at 2-5k.  Presence, which is what clarity means.
+#   2:1 compression   -1.0 dB broadband, crest down a quarter of a dB. Evens
+#                     the loud and quiet lines out.
+#
+# THE ONE I TOOK OUT was a de-esser at i=0.1. Sibilance is the harsh part of
+# "not smooth" so it belonged on the list, and on the one real voice I have it
+# is a NO-OP: p99 of the 5-9 kHz band reads -3.07 dB with it and -3.07 dB
+# without, to two decimals. At i=0.4 it buys 0.23 dB, which is no longer very
+# small. It may well earn its place on a more sibilant voice than this fixture,
+# and that is exactly the sentence this record keeps warning me about -- an
+# unfalsifiable reason to keep something. If he says the esses are harsh, it
+# goes back in with a number behind it.
+#
+# ONE DIAL. He said very small and this is what small means to me, and the
+# first thing he will say if I have it wrong is more or less rather than a
+# different chain -- so the amount is a single number and everything scales off
+# it. Same reason COVER and HERO_W became env overrides while he watched takes.
+CLARITY = 1.0
+
+
+def clarity_chain(amount: float = CLARITY) -> str:
+    """The filter string, scaled. `amount=0` is the identity chain."""
+    if amount <= 0:
+        return "anull"
+    return ",".join([
+        "highpass=f=70",
+        f"equalizer=f=250:t=q:w=1.2:g={-1.0 * amount:.2f}",
+        f"equalizer=f=3200:t=q:w=0.9:g={1.5 * amount:.2f}",
+        f"acompressor=threshold=-20dB:ratio={1 + 1.0 * amount:.2f}"
+        ":attack=15:release=200:makeup=1",
+    ])
+
+
+def raw_band_db(path: Path, lo: float, hi: float) -> float:
+    """Mean energy in a frequency range, in dB, NOT normalised.
+
+    `spectrum()` subtracts its own mean, which is right for comparing the
+    SHAPE of two different voices and wrong for asking what one filter did.
+    Measured: the mud bell moves 180-400 Hz by -0.8 dB, and through the
+    normalised curve it reads -0.08, because the highpass takes 4.4 dB out of
+    40-90 Hz and drags the mean down with it. A factor of ten, in the
+    direction that says "this stage is decoration, delete it".
+
+    I nearly did. Two instruments disagreeing by 10x is the whole reason this
+    one exists.
+    """
+    x = _mono(path)
+    nfft = 4096
+    step = nfft // 2
+    if x.size < nfft:
+        return float("-inf")
+    acc = np.zeros(nfft // 2 + 1)
+    win = np.hanning(nfft)
+    used = 0
+    for i in range(0, len(x) - nfft, step):
+        acc += np.abs(np.fft.rfft(x[i:i + nfft] * win)) ** 2
+        used += 1
+    if not used:
+        return float("-inf")
+    acc /= used
+    f = np.fft.rfftfreq(nfft, 1 / SR)
+    m = (f >= lo) & (f < hi)
+    if not m.any():
+        return float("-inf")
+    return 10 * math.log10(float(acc[m].mean()) + 1e-20)
+
+
+def band_change(before: Path, after: Path, lo: float, hi: float) -> float:
+    """dB change between two files across a frequency range, un-normalised."""
+    return raw_band_db(after, lo, hi) - raw_band_db(before, lo, hi)
+
+
+def apply_clarity(src: Path, out: Path, amount: float = CLARITY) -> dict:
+    """Run the chain and report what it moved, in both shape and level."""
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+         "-af", clarity_chain(amount), "-ar", str(WORK_SR), "-ac", "2", str(out)],
+        check=True, timeout=1800)
+    before, after = profile(src), profile(out)
+    presence = band_change(src, out, 2000, 5000)
+    body = band_change(src, out, 300, 8000)
+    return {
+        "amount": round(amount, 3),
+        "presence_db": round(presence, 2),
+        # Presence AGAINST the voice's own body, which is the number that
+        # survives. loudnorm runs immediately after this, so absolute level
+        # here is thrown away; what reaches the mix is the shape. Measured
+        # alone the presence bell is +1.25 dB, and in the full chain it reads
+        # +0.27 absolute, because the compressor takes 1.0 dB off everything.
+        # Both are true and only this one answers "is the voice brighter".
+        "presence_rel_db": round(presence - body, 2),
+        "mud_db": round(band_change(src, out, 180, 400), 2),
+        # The biggest single move in the chain, reported because it was the one
+        # I could not see. A number nobody prints is a number nobody checks.
+        "sub_db": round(band_change(src, out, 40, 90), 2),
+        "crest_db": round(after.crest - before.crest, 2),
+        "took_db": round(speech_db(out) - speech_db(src), 2),
+    }
+
+
 def place(take: Path, vocals: Path, band: Path, room: Candidate,
-          out_dir: Path, colour: bool = True) -> dict:
+          out_dir: Path, colour: bool = True, clarity: float = CLARITY) -> dict:
     """The take, in the record's room, at the record's colour and level, mixed.
 
     The order matters and every step reports what it moved:
@@ -638,8 +758,9 @@ def place(take: Path, vocals: Path, band: Path, room: Candidate,
       3. RE-MEASURE, because a room quietly takes level and says nothing. On
          2026-08-30 an aecho and a low shelf took 11.3 dB out of a voice at
          exit code 0. Anything that adds reflections scales the direct path.
-      4. level, by loudnorm to the stem's own integrated loudness
-      5. mix against the band
+      4. clarity, ON TOP of the colour and small enough to argue about
+      5. level, by loudnorm to the stem's own integrated loudness
+      6. mix against the band
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -679,6 +800,20 @@ def place(take: Path, vocals: Path, band: Path, room: Candidate,
             steps["colour"] = f"skipped: {type(e).__name__}: {e}"[:160]
             stage = wet
 
+    # On top of the colour, which is where he asked for it and where it has to
+    # be: matchering matches toward the record's curve, so a presence lift
+    # applied before it is simply matched back out.
+    if clarity > 0:
+        clear = out_dir / "_clear.wav"
+        try:
+            steps["clarity"] = apply_clarity(stage, clear, clarity)
+            stage = clear
+            steps["after_clarity_db"] = round(speech_db(stage), 2)
+        except Exception as e:                                    # noqa: BLE001
+            # Named, not swallowed, same as the colour step above. A voice in
+            # the right room at the right level is still worth having.
+            steps["clarity"] = {"skipped": f"{type(e).__name__}: {e}"[:160]}
+
     target_lufs = _lufs(vocals)
     levelled = out_dir / "_level.wav"
     subprocess.run(
@@ -696,7 +831,7 @@ def place(take: Path, vocals: Path, band: Path, room: Candidate,
     steps["placed"] = placed.name
     steps["unplaced"] = unplaced.name
     for scratch in ("_wet.wav", "_stereo.wav", "_matched.wav", "_level.wav",
-                    "_ref.wav", "_take.wav"):
+                    "_ref.wav", "_take.wav", "_clear.wav"):
         (out_dir / scratch).unlink(missing_ok=True)
     return steps
 
