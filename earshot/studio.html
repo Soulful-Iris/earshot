@@ -74,6 +74,77 @@
     softer than the source and looks like the tool degraded it. */
  .vid video{width:100%;max-width:100%;border-radius:8px;background:#000;
             display:block;margin-bottom:.4rem}
+
+ /* --- the ready room -------------------------------------------------------
+    A karaoke stage, not a row in a list. Bruno: "When i put record. It should
+    be in like in a ready room like a kareoke."
+    The point of the READY half is that you can see the meter moving before you
+    commit to a take. Recording three minutes and finding out afterwards that
+    the microphone was the wrong one is the failure this is built against. */
+ .stage{position:fixed;inset:0;z-index:50;background:#07080b;
+        display:none;flex-direction:column;padding:1.2rem;
+        opacity:0;transition:opacity .25s ease}
+ .stage.on{display:flex;opacity:1}
+ .stage .bar-top{display:flex;align-items:center;gap:.8rem;flex:0 0 auto}
+ .stage .ttl{font-weight:600;font-size:.95rem;overflow:hidden;
+             text-overflow:ellipsis;white-space:nowrap}
+ .stage .x{margin-left:auto;background:none;border:0;color:#7d848c;width:auto;
+           margin:0;padding:.3rem .5rem;font-size:1.4rem;cursor:pointer}
+ .stage .mid{flex:1 1 auto;display:flex;flex-direction:column;
+             align-items:center;justify-content:center;gap:1.1rem;
+             text-align:center;min-height:0}
+ .stage .foot{flex:0 0 auto}
+
+ /* the lyric column */
+ .lyr{width:100%;max-width:34rem}
+ .lyr .ln{font-weight:700;line-height:1.3;transition:opacity .3s,font-size .3s}
+ .lyr .prev,.lyr .next{font-size:1.05rem;opacity:.32;margin:.5rem 0;
+                       min-height:1.4em}
+ .lyr .cur{font-size:1.75rem;margin:.7rem 0;opacity:1;min-height:2.3em;
+           display:flex;align-items:center;justify-content:center;
+           flex-wrap:wrap;gap:0 .35em}
+ .lyr .cur w{white-space:pre-wrap}
+ /* Each word is its own element so the CURRENT one can be wiped through by a
+    gradient rather than flipped whole. A word that changes colour all at once
+    tells you which word; a wipe tells you where in the word you are, which is
+    the thing that actually keeps you on the beat. */
+ .lyr w{color:#fff}
+ .lyr w.done{color:#f0c040}
+ .lyr w.now{background:linear-gradient(90deg,#f0c040 var(--p,0%),#fff var(--p,0%));
+            -webkit-background-clip:text;background-clip:text;color:transparent}
+
+ /* the level meter: proof the microphone is hearing you, before and during */
+ .meter{display:flex;align-items:flex-end;justify-content:center;
+        gap:3px;height:44px}
+ .meter i{width:5px;background:#2a2f38;border-radius:2px;height:6px;
+          transition:height .06s linear,background .06s linear}
+ .meter i.lit{background:#c8a24a}
+ .meter i.hot{background:#e0806f}
+ .mtxt{color:#7d848c;font-size:.85rem}
+
+ /* the countdown */
+ .cd{font-size:5rem;font-weight:800;line-height:1;color:#c8a24a;
+     animation:pop .9s ease-out}
+ @keyframes pop{from{transform:scale(.5);opacity:0}
+                40%{transform:scale(1.08);opacity:1}
+                to{transform:scale(1);opacity:1}}
+
+ .prog{height:4px;background:#1c2027;border-radius:3px;overflow:hidden;
+       margin:.9rem 0 .5rem}
+ .prog i{display:block;height:100%;background:#c8a24a;width:0}
+ .clock{color:#7d848c;font:12.5px ui-monospace,monospace;
+        display:flex;justify-content:space-between}
+ .rec{display:inline-flex;align-items:center;gap:.5rem;color:#e0806f;
+      font-weight:600;font-size:.9rem}
+ .meter.small{height:18px;gap:2px}
+ .meter.small i{width:3px}
+ .rec b{width:9px;height:9px;border-radius:50%;background:#e0806f;
+        animation:blink 1.1s infinite}
+ @keyframes blink{50%{opacity:.25}}
+ @media (prefers-reduced-motion:reduce){
+   .cd,.rec b{animation:none}
+   .lyr .ln{transition:none}
+ }
  .words{border-top:1px solid #1e222a;padding:.9rem 0 .2rem}
  .words .hd{font-weight:600;font-size:1.05rem}
  .words .meta{color:#7d848c;font:12.5px ui-monospace,monospace;margin-top:.2rem}
@@ -118,6 +189,18 @@ comes back below.</p>
   <p class=verdict id=verdict></p>
   <div id=stems></div>
   <p class=note id=foot></p>
+</div>
+
+
+<div class=stage id=stage>
+  <div class=bar-top>
+    <span class=ttl id=stagettl></span>
+    <button class=x id=stagex aria-label=close>&times;</button>
+  </div>
+  <div class=mid>
+    <div id=stagebody></div>
+  </div>
+  <div class=foot id=stagefoot></div>
 </div>
 
 <p class=note id=error hidden></p>
@@ -416,6 +499,12 @@ async function poll() {
 // decay and the level this thing measures. Left on, it would quietly remove the
 // evidence.
 let mediaRec = null, chunks = [], bandEl = null;
+let stageWords = null, stageRaf = null, audioCtx = null, analyser = null,
+    micStream = null, stageState = 'idle';
+
+const $stage = () => document.getElementById('stage');
+const mmss = t => (t < 0 || !isFinite(t)) ? '0:00'
+  : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
 
 function singPanel(d) {
   const L = d.liveroom || {};
@@ -430,74 +519,273 @@ function singPanel(d) {
       <div class=meta>the record's room measures ${L.record_tail}s, yours
         measured ${L.take_tail}s, so you were put in a ${r.rt60}s
         ${r.tilt} one${L.placed_lufs != null ? ' at ' + L.placed_lufs + ' LUFS' : ''}</div>
+      <button class=go id=singgo>Sing it again</button>
       </div>` + one(L.unplaced, 'Just you on top', 'the take as recorded')
              + one(L.placed, 'You in their room', 'same take, placed');
   }
   if (L.state === 'refused')
     return `<div class=sing><div class=hd>Not this take</div>
       <div class=meta>${L.why}</div>
-      <button class=go id=singagain>Record another one</button></div>`;
+      <button class=go id=singgo>Record another one</button></div>`;
   if (L.state === 'queued' || L.state === 'working')
     return `<div class=sing><div class=hd>Placing you in the room</div>
-      <div class=meta>${L.stage || 'starting'}…</div></div>`;
+      <div class=meta>${L.stage || 'starting'}&hellip;</div></div>`;
   if (L.state === 'failed')
     return `<div class=sing><div class=hd>That did not work</div>
       <div class=meta>${L.why || 'unknown'}</div>
-      <button class=go id=singagain>Try again</button></div>`;
+      <button class=go id=singgo>Try again</button></div>`;
   return `<div class=sing>
     <div class=hd>Sing on it</div>
     <div class=meta>Headphones on, and stand somewhere with soft things in it.
       The backing plays while you sing; if it gets into the microphone this
       cannot measure anything and will say so.</div>
-    <button class=go id=singgo>Record</button>
-    <span class=meta id=singstate></span></div>`;
+    <button class=go id=singgo>Sing on it</button></div>`;
 }
 
 function wireSing(d) {
-  const again = document.getElementById('singagain');
-  if (again) again.onclick = () => {
-    // Clear the previous verdict so the panel offers the button again.
-    (d.liveroom || {}).state = null;
-    $('#stems').innerHTML = '';
-    poll();
-  };
   const go = document.getElementById('singgo');
-  if (!go) return;
-  go.onclick = async () => {
-    if (mediaRec && mediaRec.state === 'recording') return stopSing();
+  if (go) go.onclick = () => openStage(d);
+  const x = document.getElementById('stagex');
+  if (x) x.onclick = () => closeStage(true);
+}
+
+// --- the ready room ---------------------------------------------------------
+
+async function openStage(d) {
+  const st = $stage();
+  document.getElementById('stagettl').textContent =
+    (d.title || (d.found && 'your track') || 'sing');
+  st.classList.add('on');
+  stageState = 'ready';
+
+  // The words, if this job has usable ones. Fetched here rather than at record
+  // time so a slow request cannot land in the middle of a take.
+  stageWords = null;
+  const L = d.lyrics;
+  if (L && L.file && L.timings_usable) {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: {
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false}});
-      chunks = [];
-      mediaRec = new MediaRecorder(stream);
-      mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-      mediaRec.onstop = () => uploadTake(stream);
-      bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
-      bandEl.play();
-      mediaRec.start();
-      go.textContent = 'Stop';
-      document.getElementById('singstate').textContent = 'recording — sing';
-      bandEl.onended = () => { if (mediaRec && mediaRec.state === 'recording') stopSing(); };
-    } catch (e) {
-      document.getElementById('singstate').textContent =
-        'could not open the microphone: ' + e.message;
-    }
+      const r = await fetch('/jobs/' + jobId + '/' + L.file);
+      const j = await r.json();
+      stageWords = buildLines(j.words || []);
+    } catch (e) { stageWords = null; }
+  }
+
+  try {
+    // The SAME constraints the take is recorded under, so the meter you watch
+    // in here is measuring the signal that will actually be captured. A meter
+    // fed by a processed stream would look fine and prove nothing.
+    micStream = await navigator.mediaDevices.getUserMedia({audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false}});
+  } catch (e) {
+    document.getElementById('stagebody').innerHTML =
+      `<div class=meta>Could not open the microphone: ${e.message}</div>`;
+    return;
+  }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  audioCtx.createMediaStreamSource(micStream).connect(analyser);
+
+  renderReady(d);
+  meterLoop();
+}
+
+function renderReady(d) {
+  const first = stageWords && stageWords[0]
+    ? stageWords[0].words.map(w => w.word).join(' ') : null;
+  document.getElementById('stagebody').innerHTML = `
+    <div class=meta style="max-width:26rem">Headphones on. The backing plays
+      while you sing, and if it reaches the microphone this cannot measure
+      anything.</div>
+    <div class=meter id=meter></div>
+    <div class=mtxt id=mtxt>say something, and watch the bars</div>
+    ${first ? `<div class=lyr><div class="ln next">first line: ${first}</div></div>`
+            : `<div class=mtxt>no usable word timings for this one, so there
+                 will be nothing to follow on screen</div>`}`;
+  document.getElementById('stagefoot').innerHTML =
+    `<button class=go id=stagestart>Start</button>`;
+  document.getElementById('meter').innerHTML =
+    Array.from({length: 28}, () => '<i></i>').join('');
+  document.getElementById('stagestart').onclick = () => countIn(d);
+}
+
+// Level, drawn from the real microphone. Peak of the window rather than RMS,
+// because what somebody needs to see is that it MOVES when they talk.
+function meterLoop() {
+  const bars = document.querySelectorAll('#meter i');
+  if (!analyser || !bars.length) { stageRaf = requestAnimationFrame(meterLoop); return; }
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i] - 128));
+  const level = Math.min(1, peak / 96);
+  const lit = Math.round(level * bars.length);
+  bars.forEach((b, i) => {
+    const unit = bars.length > 30 ? 0.4 : 1.3;
+    b.style.height = (4 + (i < lit ? 3 + i * unit : 0)) + 'px';
+    b.className = i < lit ? (i > bars.length * 0.85 ? 'hot' : 'lit') : '';
+  });
+  const t = document.getElementById('mtxt');
+  if (t && stageState === 'ready')
+    t.textContent = lit > 2 ? 'it can hear you' : 'say something, and watch the bars';
+  stageRaf = requestAnimationFrame(meterLoop);
+}
+
+function countIn(d) {
+  stageState = 'counting';
+  document.getElementById('stagefoot').innerHTML = '';
+  let n = 3;
+  const body = document.getElementById('stagebody');
+  const tick = () => {
+    if (n === 0) return startTake(d);
+    body.innerHTML = `<div class=cd>${n}</div>`;
+    n--;
+    setTimeout(tick, 900);
   };
+  tick();
+}
+
+async function startTake(d) {
+  stageState = 'singing';
+  chunks = [];
+  mediaRec = new MediaRecorder(micStream);
+  mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mediaRec.onstop = () => uploadTake(micStream);
+
+  bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+  bandEl.onended = () => stopSing();
+
+  document.getElementById('stagebody').innerHTML =
+    `<div class=lyr id=lyr></div>`;
+  document.getElementById('stagefoot').innerHTML = `
+    <div class=prog><i id=pfill></i></div>
+    <div class=clock><span class=rec><b></b>recording</span>
+      <span id=pclock>0:00</span></div>
+    <div class="meter small" id=meter></div>
+    <button class=go id=stagestop>Stop</button>`;
+  document.getElementById('meter').innerHTML =
+    Array.from({length: 40}, () => '<i></i>').join('');
+  document.getElementById('stagestop').onclick = () => stopSing();
+
+  await bandEl.play();
+  mediaRec.start();
+  singLoop();
+}
+
+// Driven by the BACKING TRACK's own clock, never by a timer counting up from
+// when we pressed play. An audio element drifts against wall time whenever the
+// tab is busy or throttled, and the words would slide off the song by seconds
+// over three minutes with nothing saying so.
+function singLoop() {
+  if (stageState !== 'singing' || !bandEl) return;
+  const t = bandEl.currentTime, dur = bandEl.duration || 0;
+  const fill = document.getElementById('pfill');
+  if (fill && dur) fill.style.width = (100 * t / dur) + '%';
+  const clock = document.getElementById('pclock');
+  if (clock) clock.textContent = mmss(t) + (dur ? ' / ' + mmss(dur) : '');
+  paintLines(t);
+  requestAnimationFrame(singLoop);
+}
+
+function buildLines(words) {
+  const lines = [];
+  let buf = [];
+  const flush = () => {
+    if (!buf.length) return;
+    lines.push({start: buf[0].start, end: buf[buf.length - 1].end, words: buf});
+    buf = [];
+  };
+  for (const w of words) {
+    if (buf.length) {
+      const wide = buf.reduce((n, x) => n + x.word.length + 1, 0) + w.word.length > 38;
+      const paused = w.start - buf[buf.length - 1].end > 0.7;
+      const long = w.end - buf[0].start > 5;
+      if (wide || paused || long) flush();
+    }
+    buf.push(w);
+  }
+  flush();
+  return lines;
+}
+
+function paintLines(t) {
+  const box = document.getElementById('lyr');
+  if (!box) return;
+  if (!stageWords || !stageWords.length) {
+    if (!box.dataset.msg) {
+      box.innerHTML = `<div class="ln cur" style="font-size:1.1rem;opacity:.5">
+        no words to follow for this one &mdash; just sing</div>`;
+      box.dataset.msg = '1';
+    }
+    return;
+  }
+  let i = stageWords.findIndex(l => t < l.end);
+  if (i < 0) i = stageWords.length - 1;
+  const cur = stageWords[i];
+
+  const html = w => {
+    if (t >= w.end) return `<w class=done>${w.word}</w>`;
+    if (t < w.start) return `<w>${w.word}</w>`;
+    const p = Math.max(0, Math.min(1, (t - w.start) / Math.max(0.01, w.end - w.start)));
+    return `<w class=now style="--p:${(p * 100).toFixed(1)}%">${w.word}</w>`;
+  };
+  const key = i + ':' + Math.floor(t * 20);
+  if (box.dataset.key === key) return;      // ~20fps of DOM work, not 60
+  box.dataset.key = key;
+  const line = j => stageWords[j] ? stageWords[j].words.map(w => w.word).join(' ') : '&nbsp;';
+  box.innerHTML =
+    `<div class="ln prev">${line(i - 1)}</div>` +
+    `<div class="ln cur">${cur.words.map(html).join(' ')}</div>` +
+    `<div class="ln next">${line(i + 1)}</div>`;
 }
 
 function stopSing() {
+  stageState = 'uploading';
   if (bandEl) { bandEl.pause(); bandEl = null; }
   if (mediaRec && mediaRec.state === 'recording') mediaRec.stop();
+  document.getElementById('stagebody').innerHTML =
+    `<div class=cd style="font-size:2rem">that is a take</div>`;
+  document.getElementById('stagefoot').innerHTML = `<div class=mtxt>sending&hellip;</div>`;
+}
+
+function closeStage(hard) {
+  const st = $stage();
+  if (st) st.classList.remove('on');
+  if (stageRaf) { cancelAnimationFrame(stageRaf); stageRaf = null; }
+  if (bandEl) { bandEl.pause(); bandEl = null; }
+  if (hard && mediaRec && mediaRec.state === 'recording') {
+    // Abandoned on purpose: drop the take rather than upload half of one.
+    mediaRec.onstop = null;
+    mediaRec.stop();
+  }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; }
+  stageState = 'idle';
 }
 
 async function uploadTake(stream) {
   stream.getTracks().forEach(t => t.stop());
+  micStream = null;
   const blob = new Blob(chunks, {type: 'audio/webm'});
-  const el = document.getElementById('singstate');
-  if (el) el.textContent = 'sending ' + Math.round(blob.size / 1024) + ' KB…';
-  const r = await fetch('/jobs/' + jobId + '/take', {method: 'POST', body: blob});
-  const j = await r.json().catch(() => ({}));
-  if (!j.ok && el) { el.textContent = j.why || 'that upload did not land'; return; }
+  const foot = document.getElementById('stagefoot');
+  const say = m => { if (foot) foot.innerHTML = `<div class=mtxt>${m}</div>`; };
+  say('sending ' + Math.round(blob.size / 1024) + ' KB&hellip;');
+  try {
+    const r = await fetch('/jobs/' + jobId + '/take', {method: 'POST', body: blob});
+    const j = await r.json().catch(() => ({}));
+    if (!j.ok) {
+      // Stay ON the stage when it fails. Closing would drop somebody back to a
+      // list with no idea what happened to the three minutes they just sang.
+      say(j.why || 'that upload did not land');
+      if (foot) foot.innerHTML +=
+        `<button class=go onclick="closeStage(true)">Back</button>`;
+      return;
+    }
+  } catch (e) {
+    say('that upload did not land: ' + e.message);
+    return;
+  }
+  closeStage(false);
   poll();
 }
 
