@@ -11,18 +11,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from earshot import words                                          # noqa: E402
 
 
-def test_it_asks_for_multi_language_not_autodetect():
-    """The single line that decides whether this feature works at all.
+def test_it_tries_more_than_one_language_and_never_autodetect():
+    """SUPERSEDES a test that asserted `language=multi` was hardcoded.
 
-    Measured on a real job: detect_language=true returned 0 words on a Korean
-    vocal, language=multi returned 119, and the failure message it produced
-    blamed the singing. Control on the Italian stem that already worked: 50
-    words with detect, 48 with multi, same confidence. So multi is strictly
-    better and autodetect must never come back.
+    That test was right about autodetect and wrong about the fix. multi rescued
+    a Korean vocal that detect_language returned nothing for, and my control was
+    one Italian stem where the two settings differed by two words, so I called
+    it free and pinned it. On Bruno's English song multi got 82 words at 2.8 dB
+    alignment and en got 135 at 3.6, which is the difference between subtitles
+    and no subtitles.
+
+    So there is no globally correct language and this asserts that the code no
+    longer pretends there is.
     """
-    assert "language=multi" in words.DEEPGRAM
+    assert len(words.ATTEMPTS) > 1, "back to a single hardcoded language"
+    assert any("multi" in a for a in words.ATTEMPTS)
+    assert any("=en" in a for a in words.ATTEMPTS)
     assert "detect_language" not in words.DEEPGRAM, \
         "detect_language returns nothing on sung vocals and blames the singer"
+    assert not any("detect_language" in a for a in words.ATTEMPTS)
+
+
+def test_the_attempts_are_judged_on_alignment_not_on_word_count():
+    """The two attempts on his song both reported 0.89 confidence and one of
+    them was unusable. Whatever picks between them must not be either number
+    the recogniser hands back about itself."""
+    import inspect
+    src = inspect.getsource(words.read_vocal)
+    assert "alignment(" in src, "read_vocal no longer measures against the audio"
+    assert "mean_confidence" not in src, \
+        "picking on the recogniser's own confidence is it grading its own homework"
 
 
 def test_the_failure_message_does_not_assert_a_cause():
