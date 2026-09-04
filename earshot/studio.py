@@ -438,6 +438,38 @@ def email_done(jid: str, spec: dict, status: dict) -> bool:
     return r.returncode == 0
 
 
+def title_of(filename: str | None) -> str:
+    """A song's name, not its file's name.
+
+    Bruno, 2026-09-04: *"Why the whole link."* The projects list was printing
+    `Metric - Black Sheep (Brie Larson Vocal Version) ft. Brie Larson.mp3`,
+    extension and all, wrapping over two lines. That is a path, and it was
+    sitting where a title goes.
+
+    Only the extension is dropped here. The parentheticals and the featured
+    artist stay, because they are part of what the song is called and throwing
+    them away is a different decision from tidying a filename. The page clamps
+    the line; the text is not shortened.
+    """
+    name = (filename or "").strip()
+    if not name:
+        return "(unnamed)"
+    # REPEATEDLY, because one strip is not enough. A link job is saved as
+    # f"{title}.mp3", and archive titles routinely end in ".mp4" themselves, so
+    # the file on disk is "Beck - Ramona (Lyrics + HD).mp4.mp3" and a single
+    # `Path.stem` leaves ".mp4" sitting in the title. Only known media
+    # extensions are removed, so a song called "Blue Monday 88" keeps its name.
+    media = {".mp3", ".mp4", ".wav", ".m4a", ".webm", ".opus", ".flac",
+             ".ogg", ".aac", ".mkv", ".mov", ".avi"}
+    for _ in range(4):
+        stem = Path(name).stem
+        if stem and Path(name).suffix.lower() in media:
+            name = stem
+        else:
+            break
+    return name or "(unnamed)"
+
+
 def recent(limit: int = 12) -> list[dict]:
     """Finished jobs, newest first, for the list on the page."""
     out = []
@@ -461,7 +493,7 @@ def recent(limit: int = 12) -> list[dict]:
         # older one, saw no subtitles, and asked whether he should redo the
         # link. Nothing on screen could have told him which was which.
         vid = st.get("videos") or {}
-        out.append({"id": d.name, "name": spec.get("filename", "(unnamed)"),
+        out.append({"id": d.name, "name": title_of(spec.get("filename")),
                     "kind": (st.get("verdict") or {}).get("kind", ""),
                     "created": spec.get("created", 0),
                     "video": bool(vid.get("with_voice")),

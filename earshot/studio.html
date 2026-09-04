@@ -52,7 +52,11 @@
  .saved a{display:block;border-top:1px solid #1e222a;padding:.7rem .1rem;
           color:#e7e3dc;text-decoration:none}
  .saved a:last-child{border-bottom:1px solid #1e222a}
- .saved .nm{font-weight:600}
+ /* One line, with the end cut rather than wrapped. A title that takes two
+    lines and ends in ".mp3" reads as a file path, which is what he meant by
+    "why the whole link". The full text stays in the tooltip. */
+ .saved .nm{font-weight:600;display:block;overflow:hidden;
+            text-overflow:ellipsis;white-space:nowrap}
  .saved .k{color:#7d848c;font-size:.85rem;display:block}
  /* flex-wrap, because at 390px an input and a button side by side is about
     460px of content and the button is the one that falls off. */
@@ -277,7 +281,7 @@ async function showSaved() {
     const bits = [];
     if (j.video) bits.push(j.subtitles ? 'video, word by word' : 'video, no words');
     if (j.created) bits.push(ago(j.created));
-    return `<a href="#${j.id}"><span class=nm>${j.name}</span>
+    return `<a href="#${j.id}" title="${j.name}"><span class=nm>${j.name}</span>
       <span class=k>${[j.kind].concat(bits).filter(Boolean).join(' &middot; ')}</span></a>`;
   });
   if (!rows.length) return;

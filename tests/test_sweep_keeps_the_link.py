@@ -138,3 +138,20 @@ def test_the_projects_list_can_tell_two_runs_of_the_same_link_apart(tmp_path, mo
     assert rows["aaaaaaaaaaaa"]["subtitles"] is False
     assert rows["aaaaaaaaaaaa"]["created"] != rows["bbbbbbbbbbbb"]["created"]
     assert all(r["video"] for r in rows.values())
+
+
+def test_a_title_is_not_a_filename():
+    """Bruno, 2026-09-04: "Why the whole link."
+
+    The projects list was printing the raw filename, extension and all, wrapping
+    over two lines. A link job is saved as f"{title}.mp3" and archive titles
+    routinely end in ".mp4" themselves, so the file on disk is
+    "Beck - Ramona (Lyrics + HD).mp4.mp3" and one strip is not enough.
+    """
+    t = studio.title_of
+    assert t("Metric - Black Sheep.mp3") == "Metric - Black Sheep"
+    assert t("Beck - Ramona (Lyrics + HD).mp4.mp3") == "Beck - Ramona (Lyrics + HD)"
+    # a name that merely LOOKS like it has an extension keeps it
+    assert t("Blue Monday 88") == "Blue Monday 88"
+    assert t("a.b.c.mp3") == "a.b.c"
+    assert t("") == "(unnamed)" and t(None) == "(unnamed)"
