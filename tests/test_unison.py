@@ -280,3 +280,80 @@ def test_the_tracker_reads_a_real_separated_vocal(tmp_path):
     cached = u.track(_a_real_stem(), cache=tmp_path / "p.npz")
     assert np.array_equal(np.nan_to_num(t.f0), np.nan_to_num(cached.f0))
     assert np.array_equal(t.voiced, cached.voiced)
+
+
+# --- what Wren found: silence was free, and the safeguard could not see it ---
+
+def _lines_with_ref(m, n=20, per=2.0):
+    """Lines the SINGER actually sings, so 'you skipped it' is separable from
+    'there was nothing here'."""
+    return [Cue(i * per, (i + 1) * per, f"line {i}") for i in range(n)]
+
+
+def silent_after(m: u.Track, keep_lines: int, per: float = 2.0) -> u.Track:
+    """A take that sings the first few lines perfectly and then stops."""
+    t = u.Track(m.f0.copy(), m.voiced.copy())
+    cut = int(keep_lines * per * u.SR / u.HOP)
+    t.voiced[cut:] = False
+    return t
+
+
+def test_skipping_most_of_the_song_is_not_dead_on():
+    """Wren, 2026-09-04: sing ten seconds of a two hundred second song
+    accurately, go silent, and score() returns "0 cents dead on".
+
+    The number is not wrong. It is about a fraction of the song and used to
+    say so nowhere. No threshold fixes that, so the sentence carries it.
+    """
+    m = melody(n=2600)
+    lines = _lines_with_ref(m)
+    # SIX lines, not two. Two is four seconds, which trips MIN_FRAMES and gets
+    # refused outright -- correct, and not the hole. The hole is a take with
+    # enough overlap to earn a verdict and nowhere near enough to deserve one,
+    # which is exactly the ten-seconds-of-two-hundred Wren described.
+    take = silent_after(m, 6)
+
+    v = u.score(m, take)
+    scored = u.per_line(m, take, 0, lines)
+    assert v.median_cents < 5, "the metric itself is still blind, as expected"
+
+    sang, there = u.coverage(scored)
+    assert sang < there / 2, f"sang {sang} of {there}"
+    said = u.headline(v, scored)
+    assert "actually sang" in said, said
+    assert str(sang) in said and str(there) in said
+
+
+def test_the_safeguard_can_still_reach_its_own_check_when_lines_are_missing():
+    """The bug underneath the bug. `best_and_worst` compares only lines that
+    HAVE a score, so nineteen skipped lines vanished from the comparison
+    instead of counting against it, and `headline` could not reach the check it
+    exists for. Two sung lines were congratulated on each other."""
+    m = melody(n=2600)
+    lines = _lines_with_ref(m)
+    take = silent_after(m, 6)
+    scored = u.per_line(m, take, 0, lines)
+    assert u.coverage(scored)[0] == 6
+    assert u.coverage(scored)[1] > 10, "the reference should have plenty of lines"
+
+
+def test_a_line_the_singer_never_sang_is_not_held_against_you():
+    """The distinction that makes the above honest. A transcript can put words
+    where the vocal stem is silent, and that is not somebody skipping a line."""
+    m = melody(n=2600)
+    lines = _lines_with_ref(m) + [Cue(9000.0, 9002.0, "not in the song")]
+    scored = u.per_line(m, m, 0, lines)
+    ghost = scored[-1]
+    assert ghost.median_cents is None
+    assert ghost.ref_frames == 0
+    assert not ghost.unsung, "blamed somebody for a line the record does not have"
+    sang, there = u.coverage(scored)
+    assert there == len(lines) - 1, "counted a line nobody sings"
+
+
+def test_singing_all_of_it_says_nothing_about_coverage():
+    m = melody(n=2600)
+    lines = _lines_with_ref(m)
+    said = u.headline(u.score(m, detune(m, -45)),
+                      u.per_line(m, detune(m, -45), 0, lines))
+    assert "actually sang" not in said and "lines you sang" not in said

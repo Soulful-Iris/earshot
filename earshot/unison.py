@@ -130,7 +130,20 @@ class LineScore:
     end: float
     median_cents: float | None
     flat_or_sharp: float | None
-    frames: int
+    frames: int                # frames where BOTH of you were sounding
+    ref_frames: int = 0        # frames where the SINGER was sounding
+
+    @property
+    def unsung(self) -> bool:
+        """The singer sang here and you did not.
+
+        The distinction matters and conflating it was the bug Wren found. A
+        line can score None for two completely different reasons: you skipped
+        it, or the reference has nothing in it either because the transcript
+        put words where the vocal stem is silent. Only the first is your
+        fault, and only the first should count against you.
+        """
+        return self.median_cents is None and self.ref_frames >= MIN_LINE_FRAMES
 
 
 def _mono(path: str | Path) -> np.ndarray:
@@ -253,39 +266,83 @@ def per_line(a: Track, b: Track, shift: int, lines) -> list:
     `lines` are `video.Cue`s. Nothing new is invented: the same lines that get
     burned into the karaoke video are the ones scored here, so the sentence
     "sing this one again" names something he has already read on screen.
+
+    Each line also records how many frames the SINGER was sounding for, which
+    is what makes "you skipped this" separable from "there was nothing here".
     """
     out = []
     for c in lines:
         sa, sb = _window(a, b, shift, c.start, c.end)
         if isinstance(sa, np.ndarray):
-            out.append(LineScore(c.text, c.start, c.end, None, None, 0))
+            out.append(LineScore(c.text, c.start, c.end, None, None, 0, 0))
             continue
+        ref_frames = int(sa.voiced.sum())
         d = _diff(sa, sb, 0)
         if d.size < MIN_LINE_FRAMES:
-            out.append(LineScore(c.text, c.start, c.end, None, None, int(d.size)))
+            out.append(LineScore(c.text, c.start, c.end, None, None,
+                                 int(d.size), ref_frames))
             continue
         out.append(LineScore(c.text, c.start, c.end,
                              round(float(np.median(np.abs(d))), 1),
-                             round(float(np.median(d)), 1), int(d.size)))
+                             round(float(np.median(d)), 1), int(d.size),
+                             ref_frames))
     return out
 
 
-def headline(v: "Verdict", lines: list) -> str:
-    """The sentence somebody reads, with the median's blind spot patched.
+def coverage(lines: list) -> tuple:
+    """(lines you sang, lines there were to sing).
 
-    THE MEDIAN HIDES THE THING PEOPLE MOST WANT TOLD APART, and I did not
-    believe that hard enough until I built it. The PRD listed it as a worry.
-    Then a take that was perfect on twenty lines and 80 cents flat on ONE
-    reported "0 cents dead on", because one line in twenty cannot move a
-    median and should not be able to.
+    Wren, 2026-09-04, on the safeguard built for the median's blind spot:
+    "the fix you shipped inherited the identical blind spot one level down --
+    unsung is invisible to both the overall score and the thing that exists
+    specifically to catch what the overall score misses."
 
-    A person who was flat for four seconds of a song has not sung it dead on,
-    and a headline that says they did is wrong in the direction that makes the
-    tool useless: it agrees with you. So when the worst scored line is far
-    worse than the overall figure, the sentence says so and names it.
+    He is right and it is the same failure this record already has a name for:
+    I fixed the call site and left the sibling. `best_and_worst` compares only
+    lines that HAVE a score, so skipping nineteen lines out of twenty made them
+    vanish from the comparison rather than count against it. Sing two lines
+    well and it congratulated you on both.
     """
-    _, worst = best_and_worst(lines)
+    there = [l for l in lines if l.ref_frames >= MIN_LINE_FRAMES]
+    sang = [l for l in there if l.median_cents is not None]
+    return len(sang), len(there)
+
+
+def headline(v: "Verdict", lines: list) -> str:
+    """The sentence somebody reads, with the median's blind spots patched.
+
+    TWO OF THEM, and I only saw the first on my own.
+
+    **The median cannot see one bad line.** The PRD listed that as a worry and
+    I did not act on it. Then a take that was perfect on twenty lines and 80
+    cents flat on ONE reported "0 cents dead on", because one line in twenty
+    cannot move a median and should not be able to. A person who was flat for
+    four seconds has not sung it dead on, and a headline saying so is wrong in
+    the worst available direction: it agrees with you.
+
+    **And silence is free.** Wren found this within an hour of the first one
+    being fixed: sing ten seconds of a two hundred second song accurately, stop,
+    and it still says dead on, because the comparison only ever looks at frames
+    where both of you are sounding. Worse, the fix above could not even reach
+    its own check, since `best_and_worst` compares only lines that HAVE a score
+    and nineteen skipped lines simply vanished from the comparison. The
+    safeguard built for the first blind spot had inherited it.
+
+    Neither is a threshold problem. The number is not wrong; it is about a
+    fraction of the song and used to say so nowhere.
+    """
     base = v.sentence
+    sang, there = coverage(lines)
+
+    if there >= 4 and sang < there:
+        share = sang / there
+        if share < 0.6:
+            return (f"{base}. Only counting the {sang} of {there} lines you "
+                    f"actually sang")
+        if share < 0.9:
+            return f"{base}, over the {sang} of {there} lines you sang"
+
+    _, worst = best_and_worst(lines)
     if worst is None or worst.median_cents is None:
         return base
     if worst.median_cents > max(2.5 * v.median_cents, v.median_cents + 40):
