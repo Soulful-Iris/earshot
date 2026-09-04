@@ -32,8 +32,9 @@ from __future__ import annotations
 import os
 import subprocess
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 # Written by hand rather than found: see point 2 above. Shipped in the repo so a
 # rebuilt box gets it, and pointed at by _env() rather than by whoever launches
@@ -82,6 +83,7 @@ class Cue:
     start: float
     end: float
     text: str
+    words: list | None = None   # the individual words, for the karaoke tags
 
 
 def _env() -> dict:
@@ -108,10 +110,23 @@ def cues(words: list, gap: float = GAP, max_chars: int = MAX_CHARS,
     buf: list = []
 
     def flush() -> None:
-        if buf:
-            out.append(Cue(buf[0].start, buf[-1].end,
-                           " ".join(w.word for w in buf)))
-            buf.clear()
+        if not buf:
+            return
+        # A line must not open on a comma. The recogniser attaches punctuation
+        # to the word it follows, so a break can land after "all," and leave
+        # the next line starting ", i got real estate", which reads as a typo
+        # rather than as a lyric.
+        first = buf[0]
+        clean = first.word.lstrip(",.;:!?-'\" ")
+        if clean != first.word:
+            buf[0] = replace(first, word=clean) if is_dataclass(first) else \
+                SimpleNamespace(word=clean, start=first.start, end=first.end,
+                                confidence=getattr(first, "confidence", 0.0))
+        kept = [w for w in buf if w.word.strip()]
+        if kept:
+            out.append(Cue(kept[0].start, kept[-1].end,
+                           " ".join(w.word for w in kept), list(kept)))
+        buf.clear()
 
     for w in words:
         if buf:
@@ -150,6 +165,84 @@ def write_srt(cs: list[Cue], path: Path) -> Path:
     return path
 
 
+# --- word by word, the way a singalong does it -------------------------------
+#
+# Bruno, 2026-09-04: "subtitles should be word for word. Like a disney
+# singalong". Plain SRT puts a whole line up at once, which tells you WHAT to
+# sing and not WHEN. libass does the real thing natively with `\k` karaoke
+# tags: the line goes up in one colour and each word flips to another exactly
+# as it is sung.
+#
+# The timings this rides on are the ones read off the isolated vocal, so the
+# highlight follows the actual recording rather than a lyrics database's guess
+# at where the lines fall. That is also why it is gated: a whole line that
+# drifts a little is survivable, but a word highlighting on the wrong syllable
+# is obvious to anybody, immediately, and it is the thing you are looking at
+# while you sing.
+
+# ASS colours are &HBBGGRR, backwards from hex you would write anywhere else.
+SUNG = "&H00E7FF"      # warm gold, the word you are on and the ones behind it
+TO_SING = "&HFFFFFF"   # plain white, the ones still coming
+
+
+def ass(cs: list, height: int) -> str:
+    """An .ass subtitle file whose words light up one at a time."""
+    size = max(16, round(height / 16))
+    outline = max(2, round(height / 240))
+    head = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {round(height * 16 / 9)}
+PlayResY: {height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Sing,DejaVu Sans,{size},{SUNG},{TO_SING},&H000000,&H000000,-1,0,0,0,100,100,0,0,1,{outline},1,2,40,40,{round(height / 8)},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, Effect, Text
+"""
+    lines = []
+    for c in cs:
+        # A karaoke line has to APPEAR before its first word is sung, or the
+        # first word lights up at the same moment the line arrives and there is
+        # nothing to read ahead. Quarter of a second is enough to register.
+        start = max(0.0, c.start - 0.25)
+        text = rf"{{\k{int(round((c.start - start) * 100))}}}"
+        prev = c.start
+        for w in (c.words or []):
+            # The SILENCE before a word gets its own \k, on the space. Without
+            # it the durations sum to less than the line lasts and the
+            # highlight runs ahead of the singing a little more with every
+            # word: 1.85s of tags across a 1.95s line on the first thing I
+            # rendered. \k is a duration in centiseconds, never a timestamp,
+            # so every hundredth has to be spent somewhere.
+            gap = int(round(max(0.0, w.start - prev) * 100))
+            if gap:
+                text += rf"{{\k{gap}}} "
+            elif text and not text.endswith(" "):
+                text += " "
+            text += rf"{{\k{max(1, int(round((w.end - w.start) * 100)))}}}{w.word}"
+            prev = w.end
+        lines.append(f"Dialogue: 0,{_ass_stamp(start)},{_ass_stamp(c.end)},"
+                     f"Sing,,0,0,0,,{text.strip()}")
+    return head + "\n".join(lines) + "\n"
+
+
+def _ass_stamp(t: float) -> str:
+    t = max(0.0, t)
+    h, rem = divmod(t, 3600)
+    m, s = divmod(rem, 60)
+    return f"{int(h)}:{int(m):02d}:{s:05.2f}"
+
+
+def write_ass(cs: list, path: Path, height: int) -> Path:
+    path = Path(path)
+    path.write_text(ass(cs, height), encoding="utf-8")
+    return path
+
+
 def _escape(p: Path) -> str:
     """A path as ffmpeg's filter parser wants to see it."""
     return str(p).replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
@@ -169,8 +262,13 @@ def render_picture(video: Path, sub: Path | None, out: Path,
     out_h = min(source_height(video) or height, height)
     vf = [f"scale=-2:'min(ih,{height})'"]
     if sub is not None:
-        vf.append(f"subtitles=filename='{_escape(Path(sub))}'"
-                  f":force_style='{sub_style(out_h)}'")
+        # An .ass file carries its own style block, including the two karaoke
+        # colours. Passing force_style as well would overwrite PrimaryColour and
+        # SecondaryColour and the words would stop changing colour at all --
+        # every \k tag still there, doing nothing visible.
+        style = ("" if str(sub).endswith(".ass")
+                 else f":force_style='{sub_style(out_h)}'")
+        vf.append(f"subtitles=filename='{_escape(Path(sub))}'{style}")
     r = subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(video),
          "-vf", ",".join(vf), "-map", "0:v:0", "-an",
@@ -326,8 +424,14 @@ def make(out_dir: Path, source: Path, band: Path | None, lyrics,
         if timings_usable:
             cs = cues(lyrics.words)
             if cs:
-                sub = write_srt(cs, out_dir / "words.srt")
+                # Word by word, because he asked for a Disney singalong and a
+                # whole line appearing at once tells you what to sing without
+                # telling you when. The .srt goes out beside it because it is
+                # the thing anybody else's player can load.
+                sub = write_ass(cs, out_dir / "words.ass", 720)
+                write_srt(cs, out_dir / "words.srt")
                 result["cues"] = len(cs)
+                result["karaoke"] = True
         else:
             # Reports the outcome and stops. An earlier message in this project
             # asserted a CAUSE for a failure -- "some singing genuinely cannot

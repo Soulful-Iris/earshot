@@ -31,8 +31,9 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-# `language=multi`, NOT `detect_language=true`, and this is the most important
-# line in the file.
+# SUPERSEDED, one day later, by ATTEMPTS below: there is no single right
+# language setting and this file no longer picks one. The measurements are kept
+# because they are why `detect_language=true` is not in the list at all.
 #
 # Measured 2026-09-03 on a real job that had just come back with zero words and
 # the message "some singing genuinely cannot be read":
@@ -52,7 +53,28 @@ from pathlib import Path
 # worked: detect gave 50 words at 0.88 confidence, multi gives 48 at 0.88. Two
 # words fewer where it worked, 119 recovered where it did not.
 DEEPGRAM = ("https://api.deepgram.com/v1/listen"
-            "?model=nova-3&punctuate=true&words=true&language=multi")
+            "?model=nova-3&punctuate=true&words=true")
+
+# TRY BOTH AND KEEP WHICHEVER ACTUALLY LINES UP, rather than picking a language.
+#
+# This file used to hardcode `language=multi`. I chose that on 2026-09-03 to fix
+# a Korean track that `detect_language=true` returned nothing for, and I did run
+# a control before swapping -- an Italian stem, 50 words with detect against 48
+# with multi. Two words apart, so I called it free.
+#
+# It was not free. Bruno put an English song through the next day and got no
+# subtitles at all, because the gate correctly refused timings that did not
+# track the singing. Measured on his vocal stem:
+#
+#     language=multi   82 words, alignment 2.8 dB   (below the 3.0 bar)
+#     language=en     135 words, alignment 3.6 dB   (above it)
+#
+# Same audio, same confidence, 53 more words. My control was one song in a
+# language neither setting struggles with, and it under-represented the cost by
+# a mile. So there is no global right answer here and I should stop looking for
+# one: run both, measure both against the audio with alignment(), keep the
+# better. The measurement already exists and can already go red.
+ATTEMPTS = ("language=multi", "language=en")
 
 # Below this, the recogniser is guessing at a shape rather than hearing a word.
 # A highlighter that lands on the wrong syllable is worse than no highlighter,
@@ -78,6 +100,7 @@ class Lyrics:
     language: str | None
     mean_confidence: float
     unsure: int          # how many fell below MIN_CONFIDENCE
+    tried: list | None = None   # what each attempt scored
 
     @property
     def duration(self) -> float:
@@ -112,39 +135,61 @@ def _key() -> str:
     raise RuntimeError("no deepgram key in secretsmanager or ssm")
 
 
-def read_vocal(path: str | Path, timeout: int = 300) -> Lyrics:
-    """Transcribe an isolated vocal stem into timed words."""
-    data = Path(path).read_bytes()
+def _listen(path: Path, query: str, timeout: int) -> "Lyrics | None":
+    """One transcription attempt. None when nothing usable came back."""
     req = urllib.request.Request(
-        DEEPGRAM, data=data,
-        headers={"Authorization": f"Token {_key()}",
-                 "Content-Type": "audio/wav"})
+        f"{DEEPGRAM}&{query}", data=Path(path).read_bytes(),
+        headers={"Authorization": f"Token {_key()}", "Content-Type": "audio/wav"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         d = json.loads(r.read())
-
     try:
         ch = d["results"]["channels"][0]
         alt = ch["alternatives"][0]
-    except (KeyError, IndexError) as e:
-        raise Unreadable(f"the recogniser returned nothing usable: {e}") from e
-
+    except (KeyError, IndexError):
+        return None
     raw = alt.get("words") or []
     if not raw:
-        # Deliberately narrower than it used to be. The old message asserted a
-        # cause - "some singing genuinely cannot be read, heavy effects, a vocal
-        # buried in the mix" - and that cause was wrong: the real reason was a
-        # query parameter, and the words came back the moment it changed. So
-        # this now reports the OUTCOME and stops, because I do not know why.
-        raise Unreadable(
-            "no words came back from the vocal. The backing track is fine; there "
-            "just will not be a highlighter for this one.")
-
-    words = [Word(w["word"], float(w["start"]), float(w["end"]),
-                  float(w.get("confidence", 0.0))) for w in raw]
-    mean = sum(w.confidence for w in words) / len(words)
-    unsure = sum(1 for w in words if w.confidence < MIN_CONFIDENCE)
-    return Lyrics(words=words, language=ch.get("detected_language"),
+        return None
+    ws = [Word(w["word"], float(w["start"]), float(w["end"]),
+               float(w.get("confidence", 0.0))) for w in raw]
+    mean = sum(w.confidence for w in ws) / len(ws)
+    unsure = sum(1 for w in ws if w.confidence < MIN_CONFIDENCE)
+    return Lyrics(words=ws, language=ch.get("detected_language"),
                   mean_confidence=mean, unsure=unsure)
+
+
+def read_vocal(path: str | Path, timeout: int = 300) -> Lyrics:
+    """Transcribe an isolated vocal stem into timed words.
+
+    Runs every attempt in ATTEMPTS and keeps the one whose timings best track
+    the audio. Judged by alignment() and NOT by word count or by the
+    recogniser's own confidence, both of which said the two attempts on Bruno's
+    song were equally good (0.89 either way) while one of them was unusable.
+    """
+    path = Path(path)
+    best, best_al, tried = None, None, []
+    for query in ATTEMPTS:
+        try:
+            lyr = _listen(path, query, timeout)
+        except Exception as e:                                    # noqa: BLE001
+            tried.append(f"{query}: {type(e).__name__}")
+            continue
+        if lyr is None:
+            tried.append(f"{query}: nothing")
+            continue
+        al = alignment(path, lyr)
+        tried.append(f"{query}: {len(lyr.words)}w align={al}")
+        # None means not enough to compare on; keep it only if it is all we have.
+        score = -99.0 if al is None else al
+        if best is None or score > best_al:
+            best, best_al = lyr, score
+    if best is None:
+        raise Unreadable(
+            "no words came back from the vocal. The backing track is fine; "
+            "there just will not be a highlighter for this one. "
+            f"({'; '.join(tried)})")
+    best.tried = tried
+    return best
 
 
 def save(lyrics: Lyrics, path: str | Path) -> Path:

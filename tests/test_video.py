@@ -200,3 +200,89 @@ def test_the_scratch_picture_is_not_left_behind(tmp_path):
         check=True, timeout=300)
     video.make(tmp_path, with_audio, None, None, None)
     assert not (tmp_path / "_picture.mp4").exists()
+
+
+# --- word by word, the Disney singalong ---------------------------------------
+
+def test_every_hundredth_of_a_second_is_spent_somewhere():
+    """`\\k` is a DURATION in centiseconds, never a timestamp.
+
+    The first version emitted a tag per word and nothing for the silence
+    between them, so the tags summed to 1.85 s across a 1.95 s line and the
+    highlight ran ahead of the singing, a little further with every word.
+    """
+    import re
+    ws = [W("hold", 0.5, 0.9), W("on", 0.9, 1.4), W("tight", 1.5, 2.2)]
+    cs = video.cues(ws)
+    line = [l for l in video.ass(cs, 720).splitlines()
+            if l.startswith("Dialogue")][0]
+    tags = [int(t) for t in re.findall(r"\\k(\d+)", line)]
+    span = round((cs[0].end - (cs[0].start - 0.25)) * 100)
+    assert sum(tags) == span, f"tags sum to {sum(tags)}cs across a {span}cs line"
+
+
+def test_the_line_arrives_before_its_first_word_is_sung():
+    """Otherwise the first word lights up the instant the line appears and
+    there is nothing to read ahead of."""
+    cs = video.cues([W("go", 4.0, 4.4)])
+    line = [l for l in video.ass(cs, 720).splitlines()
+            if l.startswith("Dialogue")][0]
+    start = line.split(",")[1]
+    assert start == "0:00:03.75", start
+
+
+def test_the_two_karaoke_colours_are_different():
+    """Sung and unsung must differ or every tag is there doing nothing."""
+    head = video.ass(video.cues([W("a", 0.5, 0.9)]), 720)
+    assert video.SUNG != video.TO_SING
+    assert video.SUNG in head and video.TO_SING in head
+
+
+def test_a_line_never_opens_on_a_comma():
+    """The recogniser hangs punctuation off the previous word, so a break can
+    leave the next line starting ', i got real estate', which reads as a typo."""
+    ws = [W("all,", 0.2, 0.5), W(",i", 3.0, 3.2), W("got", 3.2, 3.5)]
+    cs = video.cues(ws)
+    assert all(c.text[:1] not in ",.;:!?" for c in cs), [c.text for c in cs]
+
+
+@needs_ffmpeg
+def test_the_highlight_actually_moves_across_the_line(tmp_path):
+    """The whole feature, measured rather than assumed.
+
+    One frame showing two colours proves a split. It does not prove the split
+    MOVES, and a static split is exactly what a broken `\\k` chain looks like.
+    So: count gold pixels early in the line and late in it.
+    """
+    import numpy as np
+    # BLACK, not testsrc. testsrc is a colour-bar pattern with yellow bars in
+    # it, so counting gold pixels over it counts the background: the first run
+    # of this test read 6400 gold pixels "early" and 7397 "late" and almost
+    # passed on a 1.16x ratio that had nothing to do with the subtitles. On
+    # black, gold can only have come from the text. The background being
+    # identical at both timestamps is the point here, not a weakness.
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi",
+         "-i", "color=c=black:s=640x360:rate=10:duration=6",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         str(src)], check=True, timeout=300)
+    ws = [W(w, 1.0 + i * 0.6, 1.5 + i * 0.6)
+          for i, w in enumerate("one two three four five".split())]
+    sub = video.write_ass(video.cues(ws), tmp_path / "k.ass", 720)
+
+    def gold(at):
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(src),
+             "-vf", f"subtitles=filename='{video._escape(sub)}'",
+             "-ss", f"{at}", "-frames:v", "1", "-f", "rawvideo",
+             "-pix_fmt", "rgb24", "-"],
+            capture_output=True, timeout=300, env=video._env()).stdout
+        a = np.frombuffer(raw, dtype=np.uint8)
+        a = a[: (a.size // 3) * 3].reshape(-1, 3).astype(np.int16)
+        # gold is high red, high green, low blue
+        return int(((a[:, 0] > 150) & (a[:, 1] > 130) & (a[:, 2] < 90)).sum())
+
+    early, late = gold(1.4), gold(3.7)
+    assert late > early * 1.5, (
+        f"the highlight did not advance: {early} gold pixels early, {late} late")
