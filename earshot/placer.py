@@ -21,6 +21,55 @@ from pathlib import Path
 from .worker import write_status
 
 
+def score_take(job: Path, take: Path, vocals: Path) -> None:
+    """Compare the take's pitch line against the record's, and write the result.
+
+    The reference track is cached beside the stems as `pitch.npz`. It never
+    changes, it costs about 12 seconds for a three and a half minute song, and
+    every take after the first reads it back in milliseconds.
+    """
+    from . import unison, video, words as _words
+
+    write_status(job, unison={"state": "working",
+                              "stage": "reading the melody off the record"})
+    ref = unison.track(vocals, cache=job / "out" / "pitch.npz")
+
+    write_status(job, unison={"state": "working", "stage": "listening to you"})
+    yours = unison.track(take)
+
+    shift = unison.offset(ref, yours)
+    v = unison.score(ref, yours, shift)
+    if v is None:
+        write_status(job, unison={
+            "state": "refused",
+            "why": ("you and the singer only overlapped for a moment, so there "
+                    "is nothing to compare. Sing a bit more of it.")})
+        print("unison: not enough overlap", flush=True)
+        return
+
+    lines = []
+    wjson = job / "out" / "words.json"
+    if wjson.is_file():
+        lines = video.cues(_words.load(wjson).words)
+    scored = unison.per_line(ref, yours, shift, lines) if lines else []
+    best, worst = unison.best_and_worst(scored)
+
+    write_status(job, unison={
+        "state": "done",
+        "headline": unison.headline(v, scored),
+        **v.as_dict(),
+        "best": None if best is None else
+                {"text": best.text, "cents": best.median_cents},
+        "worst": None if worst is None else
+                 {"text": worst.text, "cents": worst.median_cents,
+                  "signed": worst.flat_or_sharp},
+        "lines": [{"text": l.text, "start": round(l.start, 2),
+                   "end": round(l.end, 2), "cents": l.median_cents,
+                   "signed": l.flat_or_sharp} for l in scored],
+        "contours": unison.contours(ref, yours, shift)})
+    print(f"unison: {unison.headline(v, scored)}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) < 2:
@@ -74,6 +123,20 @@ def main(argv: list[str] | None = None) -> int:
             "colour": steps.get("colour"),
             "elapsed": round(time.time() - started, 1)})
         print(f"placed in {time.time() - started:.0f}s: {steps}", flush=True)
+
+        # --- how close you sang it ------------------------------------------
+        #
+        # Separate from the placement on purpose. `liveroom` moves your voice
+        # into the record's room; this has an opinion about whether you sang
+        # the right notes, and neither should be able to break the other. It
+        # runs last and is wrapped, because a scoring failure must never lose a
+        # take that is already mixed and on disk.
+        try:
+            score_take(job, take, vocals)
+        except Exception as e:                               # noqa: BLE001
+            traceback.print_exc()
+            write_status(job, unison={"state": "failed",
+                                      "why": f"{type(e).__name__}: {e}"[:200]})
         return 0
 
     except Exception as e:                                   # noqa: BLE001

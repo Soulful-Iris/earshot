@@ -92,7 +92,15 @@
            margin:0;padding:.3rem .5rem;font-size:1.4rem;cursor:pointer}
  .stage .mid{flex:1 1 auto;display:flex;flex-direction:column;
              align-items:center;justify-content:center;gap:1.1rem;
-             text-align:center;min-height:0}
+             text-align:center;min-height:0;overflow-y:auto;width:100%}
+ /* The replay stacks a lyric block, a canvas and two paragraphs, which is more
+    than fits a phone at the sizes the singing view uses. Without this they
+    overlap and the words render on top of the ribbon. */
+ .stage #stagebody{display:flex;flex-direction:column;align-items:center;
+                   gap:.5rem;width:100%}
+ .stage.replaying .lyr .cur{font-size:1.25rem;min-height:1.6em;margin:.2rem 0}
+ .stage.replaying .lyr .prev,.stage.replaying .lyr .next{
+                   font-size:.92rem;min-height:1.2em;margin:.15rem 0}
  .stage .foot{flex:0 0 auto}
 
  /* the lyric column */
@@ -145,6 +153,18 @@
    .cd,.rec b{animation:none}
    .lyr .ln{transition:none}
  }
+
+ /* --- the ribbon -----------------------------------------------------------
+    Two pitch lines drawn over each other: the singer's and yours. Gold is
+    them, white is you, and where you are within half a semitone the gap
+    between the lines is filled in. The eye reads "solid means right" in about
+    a second, which is why there is no legend. */
+ .ribbon{width:100%;max-width:34rem;height:180px;display:block;
+         background:#0b0d10;border-radius:10px;margin:.6rem 0}
+ .said{font-size:1.15rem;font-weight:700;line-height:1.35;margin:.2rem 0 .1rem}
+ .lines2{color:#9aa0a6;font-size:.9rem;line-height:1.5;margin-top:.5rem}
+ .lines2 b{color:#e7e3dc;font-weight:600}
+ .lines2 .bad{color:#e0b46f}
  .words{border-top:1px solid #1e222a;padding:.9rem 0 .2rem}
  .words .hd{font-weight:600;font-size:1.05rem}
  .words .meta{color:#7d848c;font:12.5px ui-monospace,monospace;margin-top:.2rem}
@@ -515,7 +535,26 @@ function singPanel(d) {
       <audio controls preload=metadata src="/jobs/${jobId}/${f}"></audio>
       <a class=dl href="/jobs/${jobId}/${f}" download>Download</a></div>`;
     const r = L.room || {};
-    return `<div class=sing><div class=hd>You, on the record</div>
+    // The score, and a way BACK to it. Without this the ribbon exists only in
+    // the seconds after a take: close the tab and the thing you sang for is
+    // unreachable, which is the same failure as two projects with the same
+    // name, one screen further in.
+    const U = d.unison || {};
+    let scored = '';
+    if (U.state === 'done') {
+      scored = `<div class=sing><div class=hd>How close you were</div>
+        <div class=said style="font-size:1.05rem">${U.headline}</div>
+        <div class=lines2>
+          ${U.best ? `Best line: <b>${U.best.text}</b>, ${Math.round(U.best.cents)} cents out.` : ''}
+          ${U.worst ? `<br>Sing again: <b class=bad>${U.worst.text}</b>,
+             ${Math.round(U.worst.cents)} cents
+             ${U.worst.signed < 0 ? 'flat' : 'sharp'}.` : ''}</div>
+        <button class=go id=watchback>Watch it back</button></div>`;
+    } else if (U.state === 'refused') {
+      scored = `<div class=sing><div class=hd>No score for this one</div>
+        <div class=meta>${U.why}</div></div>`;
+    }
+    return scored + `<div class=sing><div class=hd>You, on the record</div>
       <div class=meta>the record's room measures ${L.record_tail}s, yours
         measured ${L.take_tail}s, so you were put in a ${r.rt60}s
         ${r.tilt} one${L.placed_lufs != null ? ' at ' + L.placed_lufs + ' LUFS' : ''}</div>
@@ -543,6 +582,12 @@ function singPanel(d) {
 }
 
 function wireSing(d) {
+  const back = document.getElementById('watchback');
+  if (back) back.onclick = () => {
+    document.getElementById('stagettl').textContent = d.title || 'your take';
+    $stage().classList.add('on');
+    renderReplay(d);
+  };
   const go = document.getElementById('singgo');
   if (go) go.onclick = () => openStage(d);
   const x = document.getElementById('stagex');
@@ -714,7 +759,7 @@ function paintLines(t) {
   if (!stageWords || !stageWords.length) {
     if (!box.dataset.msg) {
       box.innerHTML = `<div class="ln cur" style="font-size:1.1rem;opacity:.5">
-        no words to follow for this one &mdash; just sing</div>`;
+        no words to follow for this one, just sing</div>`;
       box.dataset.msg = '1';
     }
     return;
@@ -750,7 +795,8 @@ function stopSing() {
 
 function closeStage(hard) {
   const st = $stage();
-  if (st) st.classList.remove('on');
+  if (st) { st.classList.remove('on'); st.classList.remove('replaying'); }
+  if (replayAudio) { replayAudio.pause(); replayAudio = null; }
   if (stageRaf) { cancelAnimationFrame(stageRaf); stageRaf = null; }
   if (bandEl) { bandEl.pause(); bandEl = null; }
   if (hard && mediaRec && mediaRec.state === 'recording') {
@@ -785,8 +831,187 @@ async function uploadTake(stream) {
     say('that upload did not land: ' + e.message);
     return;
   }
-  closeStage(false);
-  poll();
+  // The stage stays OPEN. Closing here would drop somebody back to a list
+  // while the thing they just sang is being scored, and the replay is the
+  // whole point of having sung it.
+  if (bandEl) { bandEl.pause(); bandEl = null; }
+  waitForScore();
+}
+
+// --- the replay -------------------------------------------------------------
+//
+// The stage does not close when you stop singing. It waits for the score and
+// then plays the take back with the words wiping as they did while you sang,
+// and a ribbon under them showing the singer's pitch line against yours.
+let replayAudio = null, ribbonData = null, ribbonMid = null;
+
+async function waitForScore() {
+  const foot = document.getElementById('stagefoot');
+  const body = document.getElementById('stagebody');
+  for (let i = 0; i < 400; i++) {
+    let d;
+    try { d = await (await fetch('/jobs/' + jobId)).json(); }
+    catch (e) { await sleep(3000); continue; }
+    const U = d.unison || {}, L = d.liveroom || {};
+    if (U.state === 'done') return renderReplay(d);
+    if (U.state === 'refused' || U.state === 'failed' ||
+        L.state === 'refused' || L.state === 'failed') {
+      const why = U.why || L.why || 'that did not work';
+      if (body) body.innerHTML = `<div class=meta style="max-width:24rem">${why}</div>`;
+      if (foot) foot.innerHTML = `<button class=go onclick="closeStage(true);poll()">Back</button>`;
+      return;
+    }
+    const stage = U.stage || L.stage || 'working';
+    if (body) body.innerHTML = `<div class=cd style="font-size:1.4rem">${stage}</div>`;
+    await sleep(2500);
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function renderReplay(d) {
+  const U = d.unison, L = d.liveroom || {};
+  if (!stageWords) {
+    const L2 = d.lyrics;
+    if (L2 && L2.file && L2.timings_usable) {
+      try {
+        const j = await (await fetch('/jobs/' + jobId + '/' + L2.file)).json();
+        stageWords = buildLines(j.words || []);
+      } catch (e) { stageWords = null; }
+    }
+  }
+  ribbonData = U.contours;
+  ribbonMid = null;
+  stageState = 'replay';
+  $stage().classList.add('replaying');
+
+  const worst = U.worst, best = U.best;
+  document.getElementById('stagebody').innerHTML = `
+    <div class=lyr id=lyr></div>
+    <canvas class=ribbon id=ribbon></canvas>
+    <div class=said id=said>${U.headline}</div>
+    <div class=lines2>
+      ${best ? `Best line: <b>${best.text}</b>, ${Math.round(best.cents)} cents out.` : ''}
+      ${worst ? `<br>Sing again: <b class=bad>${worst.text}</b>,
+                 ${Math.round(worst.cents)} cents
+                 ${worst.signed < 0 ? 'flat' : 'sharp'}.` : ''}
+    </div>`;
+  document.getElementById('stagefoot').innerHTML = `
+    <div class=prog><i id=pfill></i></div>
+    <div class=clock><span id=pclock>0:00</span>
+      <span>${Math.round(100 * U.share_within_50)}% of it on the note</span></div>
+    <button class=go id=replaygo>Play it back</button>
+    <button class=go id=singmore style="background:#2a2f38;color:#e7e3dc">Sing it again</button>`;
+
+  const src = L.placed ? `/jobs/${jobId}/${L.placed}` : null;
+  replayAudio = src ? new Audio(src) : null;
+  document.getElementById('replaygo').onclick = () => {
+    if (!replayAudio) return;
+    if (!replayAudio.paused) { replayAudio.pause(); return; }
+    replayAudio.play();
+    replayLoop();
+  };
+  document.getElementById('singmore').onclick = () => { closeStage(true); openStage(d); };
+  drawRibbon(0);
+}
+
+function replayLoop() {
+  if (stageState !== 'replay' || !replayAudio) return;
+  const t = replayAudio.currentTime, dur = replayAudio.duration || 0;
+  const fill = document.getElementById('pfill');
+  if (fill && dur) fill.style.width = (100 * t / dur) + '%';
+  const clock = document.getElementById('pclock');
+  if (clock) clock.textContent = mmss(t) + (dur ? ' / ' + mmss(dur) : '');
+  paintLines(t);
+  drawRibbon(t);
+  if (!replayAudio.paused) requestAnimationFrame(replayLoop);
+}
+
+// A moving window rather than the whole song squeezed onto 34rem. Six seconds
+// wide: narrow enough that a semitone is a visible distance, wide enough that
+// you can see a phrase rather than a moment.
+const RIBBON_WINDOW = 6.0;
+
+function drawRibbon(now) {
+  const c = document.getElementById('ribbon');
+  if (!c || !ribbonData) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const D = ribbonData;
+  const t0 = now - RIBBON_WINDOW / 2, t1 = now + RIBBON_WINDOW / 2;
+  const x = t => (t - t0) / (t1 - t0) * w;
+
+  const i0 = lowerBound(D.t, t0), i1 = lowerBound(D.t, t1);
+
+  // The window FOLLOWS the melody. Centring on the song's overall median put
+  // every phrase that is not average against an edge: on the first render the
+  // lines sat along the bottom of the box, half of them clipped off it. The
+  // scale stays fixed at `span` semitones so a gap always means the same
+  // distance; only where the box sits moves.
+  const here = [];
+  for (let i = i0; i < i1; i++) if (D.ref[i] != null) here.push(D.ref[i]);
+  let mid = D.centre;
+  if (here.length) { here.sort((a, b) => a - b); mid = here[here.length >> 1]; }
+  ribbonMid = ribbonMid == null ? mid : ribbonMid + (mid - ribbonMid) * 0.12;
+  const top = ribbonMid + D.span / 2, bot = ribbonMid - D.span / 2;
+  const y = s => h - (s - bot) / (top - bot) * h;
+
+  // semitone gridlines, faint, so a gap has a scale
+  g.strokeStyle = '#161a20'; g.lineWidth = 1;
+  for (let s = Math.ceil(bot); s <= top; s++) {
+    g.beginPath(); g.moveTo(0, y(s)); g.lineTo(w, y(s)); g.stroke();
+  }
+
+  // the fill first, under both lines: solid means you were on it
+  g.fillStyle = 'rgba(200,162,74,0.30)';
+  let run = null;
+  for (let i = i0; i < i1; i++) {
+    const r = D.ref[i], u = D.you[i];
+    const on = r != null && u != null && Math.abs(r - u) <= D.on_note;
+    if (on && !run) run = [i];
+    if (!on && run) { fillRun(g, D, run[0], i, x, y); run = null; }
+  }
+  if (run) fillRun(g, D, run[0], i1, x, y);
+
+  line(g, D.t, D.ref, i0, i1, x, y, '#c8a24a', 3);
+  line(g, D.t, D.you, i0, i1, x, y, '#ffffff', 2);
+
+  // the playhead
+  g.strokeStyle = 'rgba(231,227,220,0.35)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x(now), 0); g.lineTo(x(now), h); g.stroke();
+}
+
+function fillRun(g, D, a, b, x, y) {
+  if (b - a < 2) return;
+  g.beginPath();
+  for (let i = a; i < b; i++) g.lineTo(x(D.t[i]), y(D.ref[i]));
+  for (let i = b - 1; i >= a; i--) g.lineTo(x(D.t[i]), y(D.you[i]));
+  g.closePath(); g.fill();
+}
+
+function line(g, ts, vals, i0, i1, x, y, colour, width) {
+  g.strokeStyle = colour; g.lineWidth = width;
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  g.beginPath();
+  let pen = false;
+  for (let i = i0; i < i1; i++) {
+    const v = vals[i];
+    if (v == null) { pen = false; continue; }
+    if (!pen) { g.moveTo(x(ts[i]), y(v)); pen = true; }
+    else g.lineTo(x(ts[i]), y(v));
+  }
+  g.stroke();
+}
+
+function lowerBound(arr, v) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < v) lo = m + 1; else hi = m; }
+  return lo;
 }
 
 </script>
