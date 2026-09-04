@@ -337,9 +337,40 @@ def describe(job: Job) -> dict:
                    "db": levels.get(name),
                    "status": status.get(name, "present")}
             for name, fname in (st.get("parts") or {}).items()}
+        _check_take_survives(job, st)
     elif st.get("state") in (None, "queued"):
         st["ahead"] = position(job.id)
     return st
+
+
+def _check_take_survives(job: Job, st: dict) -> None:
+    """A take is the ONE artefact here that is not backed up, so say when it goes.
+
+    Stems and videos are copied to S3 and the download route pulls them back on
+    demand, which is why `sweep()` can delete the local media and every link
+    keeps working. `placed.mp3` and `unplaced.mp3` are never uploaded, so six
+    hours after somebody sings the files go and nothing notices: the status
+    still says `state: done`, the page still offers two downloads, and "Watch
+    it back" still builds an Audio pointing at a 404 and plays silence.
+
+    Found by driving the new sing-along door in a real browser and reading the
+    server log: two 404s for files the page was confidently advertising.
+
+    This does not fix the loss. Whether takes should be kept, and for how long,
+    is a product decision and Bruno's -- they are a recording of somebody's
+    voice, which is not the same class of thing as the stems of a song they
+    uploaded. What it stops is the page lying about it.
+    """
+    L = st.get("liveroom")
+    if not isinstance(L, dict) or L.get("state") != "done":
+        return
+    out = job.dir / "out"
+    names = [L[k] for k in ("placed", "unplaced") if L.get(k)]
+    if names and all((out / n).is_file() for n in names):
+        return
+    st["liveroom"] = dict(L, state="gone",
+                          why="the recording of your take was cleared with the "
+                              "rest of the media after a few hours")
 
 
 # ---------------------------------------------------------------------------

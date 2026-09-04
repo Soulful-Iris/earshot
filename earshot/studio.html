@@ -2,31 +2,78 @@
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>earshot &mdash; pull a song apart</title>
 <style>
- :root{color-scheme:dark}
+ /* --- tokens ---------------------------------------------------------------
+    There was no scale here before: two type sizes, one grey, one gold, and a
+    1px hairline between every block. Fourteen things rendered identically, so
+    the karaoke stage and the piano stem read as the same kind of object. Bruno,
+    2026-09-04: "make sure to have like a different experience for the sing
+    along or like u know videos with and without voice", and the day before
+    that, "Its very outdated. Also not really pretty to the eye."
+    Naming the steps is what stops the next edit inventing a fifteenth grey. */
+ :root{
+   color-scheme:dark;
+   --bg:#0b0d10; --panel:#12151b; --panel-2:#171b22; --line:#232833;
+   --ink:#ece8e1; --ink-2:#a3aab3; --ink-3:#727a85;
+   --gold:#d8ae52; --gold-dim:#8a6f2e; --warm:#e0806f;
+   --r-lg:16px; --r-md:11px; --r-sm:7px;
+   --s-1:.35rem; --s-2:.6rem; --s-3:1rem; --s-4:1.5rem; --s-5:2.4rem;
+   --t-display:clamp(1.5rem,6vw,2.1rem); --t-title:1.12rem; --t-body:1rem;
+   --t-cap:.86rem; --t-mono:12.5px;
+   --ease:cubic-bezier(.2,.7,.3,1);
+ }
  *{box-sizing:border-box}
- body{background:#0d0f12;color:#e7e3dc;font:16px/1.55 ui-sans-serif,system-ui,sans-serif;
-      margin:0;padding:2.2rem 1.2rem;display:flex;justify-content:center}
+ body{background:var(--bg);color:var(--ink);
+      font:16px/1.55 ui-sans-serif,system-ui,sans-serif;
+      margin:0;padding:2.2rem 1.2rem;display:flex;justify-content:center;
+      -webkit-font-smoothing:antialiased}
  main{width:100%;max-width:44rem}
  h1{font-size:1.6rem;margin:0 0 .2rem;letter-spacing:-.015em}
- h2{font-size:1rem;margin:2.2rem 0 .7rem;color:#9aa0a6;font-weight:600;
+ h2{font-size:1rem;margin:2.2rem 0 .7rem;color:var(--ink-2);font-weight:600;
     text-transform:uppercase;letter-spacing:.06em}
- .sub{color:#9aa0a6;margin:0 0 1.8rem}
+ .sub{color:var(--ink-2);margin:0 0 1.8rem}
  /* display:block is not decoration. A <label> is INLINE by default, so with a
     border and padding but no display it renders as fragments across three line
     boxes, the text spills past the right edge and the button lands on top of
     it. That is what he meant by "ui is messed up", and I could not see it
     because I had never rendered one of my own pages. */
- .drop{display:block;border:1.5px dashed #2f3540;border-radius:.7rem;
-       padding:1.5rem 1rem;text-align:center;background:#12151a;cursor:pointer;
+ /* --- the way in ----------------------------------------------------------
+    A file picker, a URL box, two paragraphs and a disabled button used to be
+    five unrelated blocks down the page. They are one card with two routes now,
+    the link first because it is the one that gets used. */
+ .hero{margin-bottom:var(--s-4)}
+ .hero h1{font-size:clamp(1.7rem,7vw,2.3rem);letter-spacing:-.025em}
+ .hero .sub{margin:0;max-width:26rem}
+ .start{border:1px solid var(--line);border-radius:var(--r-lg);
+        background:var(--panel);padding:var(--s-3)}
+ .field+.field{margin-top:0}
+ .lbl{display:block;font-size:.72rem;font-weight:700;letter-spacing:.12em;
+      text-transform:uppercase;color:var(--ink-3);margin-bottom:var(--s-2)}
+ /* Small print inside the card. It is honest and worth keeping -- it says why
+    a YouTube link might not work before you spend a wait finding out -- but at
+    body size between the two routes it was the largest thing in the card. */
+ .start .note{font-size:.82rem;line-height:1.5;color:var(--ink-3);
+              margin:.55rem 0 0}
+ .or{display:flex;align-items:center;gap:var(--s-2);margin:var(--s-3) 0;
+     color:var(--ink-3);font-size:var(--t-cap)}
+ .or::before,.or::after{content:"";flex:1 1 auto;height:1px;background:var(--line)}
+ .drop{display:block;border:1.5px dashed #2f3540;border-radius:var(--r-md);
+       padding:1.3rem 1rem;text-align:center;background:#0e1115;cursor:pointer;
        transition:border-color .15s,background .15s;overflow-wrap:anywhere}
- .drop:hover,.drop.over{border-color:#c8a24a;background:#171b21}
- .drop b{color:#e7e3dc}
- .drop span{color:#7d848c;font-size:.9rem}
+ .drop:hover,.drop.over{border-color:var(--gold);background:#141821}
+ .drop b{color:var(--ink);display:block;margin-bottom:.25rem}
+ .drop span{color:var(--ink-3);font-size:.88rem}
  #file{display:none}
- button{display:block;width:100%;background:#c8a24a;color:#15120a;border:0;
-        border-radius:.5rem;padding:.85rem 1.3rem;font:600 1rem inherit;
-        cursor:pointer;margin-top:1.1rem}
- button[disabled]{opacity:.45;cursor:default}
+ button{display:block;width:100%;background:var(--gold);color:#15120a;border:0;
+        border-radius:var(--r-sm);padding:.85rem 1.3rem;font:600 1rem inherit;
+        cursor:pointer;margin-top:.8rem;
+        transition:filter .15s var(--ease),transform .1s var(--ease)}
+ button:not([disabled]):hover{filter:brightness(1.08)}
+ button:not([disabled]):active{transform:translateY(1px)}
+ /* A gold button at 45% opacity is a muddy olive slab, which reads as broken
+    rather than as not-yet-ready. Disabled should look like a different thing,
+    not like a damaged version of the enabled thing. */
+ button[disabled]{background:transparent;color:var(--ink-3);
+                  border:1px dashed var(--line);cursor:default;opacity:1}
  .bar{height:.5rem;background:#1c2027;border-radius:1rem;overflow:hidden;margin:.7rem 0 .4rem}
  .bar i{display:block;height:100%;background:#c8a24a;width:0;transition:width .4s}
  .verdict{font-size:1.25rem;font-weight:600;margin:1.8rem 0 .2rem;
@@ -36,22 +83,31 @@
  /* Stacked blocks, not a table. A player, a level and a download link across
     three columns is about 520px of content on a 390px phone, and the audio
     element is the one that loses. */
- .stem{border-top:1px solid #1e222a;padding:.85rem 0}
- .stem:last-child{border-bottom:1px solid #1e222a}
+ .stem{border-top:1px solid var(--line);padding:.8rem 0}
+ .stem:first-child{border-top:0}
  .stem .top{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
- .stem .n{font-weight:600;font-size:1.05rem}
- .stem .lv{color:#7d848c;font:12.5px ui-monospace,monospace;margin-left:auto}
- .stem .d{color:#7d848c;font-size:.85rem}
- .stem.gone .n{color:#7d848c;font-weight:500}
- a.dl{display:inline-block;color:#c8a24a;text-decoration:none;font-weight:600;
-      padding:.45rem 0;font-size:.95rem}
+ .stem .n{font-weight:600;font-size:.98rem}
+ .stem .lv{color:var(--ink-3);font:var(--t-mono) ui-monospace,monospace;
+           margin-left:auto}
+ .stem .d{color:var(--ink-3);font-size:.85rem}
+ .stem.gone .n{color:var(--ink-3);font-weight:500}
+ .stem.gone{opacity:.6}
+ /* A repeated orange sentence ten times down a page is not a control, it is
+    wallpaper. Same target, same colour, one word. */
+ a.dl{display:inline-block;color:var(--ink-2);text-decoration:none;
+      font-weight:600;padding:.4rem 0;font-size:var(--t-cap)}
+ a.dl:hover{color:var(--gold)}
+ .door a.dl{padding:.7rem 0}
  .why{color:#9aa0a6;font-size:.92rem;margin-top:2.4rem;border-top:1px solid #23272e;padding-top:1.2rem}
  .why b{color:#e7e3dc}
  a{color:#c8a24a}
  audio{width:100%;margin-top:.35rem}
- .saved a{display:block;border-top:1px solid #1e222a;padding:.7rem .1rem;
-          color:#e7e3dc;text-decoration:none}
- .saved a:last-child{border-bottom:1px solid #1e222a}
+ .saved{display:flex;flex-direction:column;gap:.5rem}
+ .saved a{display:block;border:1px solid var(--line);border-radius:var(--r-md);
+          background:var(--panel);padding:.8rem .9rem;
+          color:var(--ink);text-decoration:none;
+          transition:border-color .15s var(--ease),background .15s var(--ease)}
+ .saved a:hover{border-color:#31394a;background:var(--panel-2)}
  /* One line, with the end cut rather than wrapped. A title that takes two
     lines and ends in ".mp3" reads as a file path, which is what he meant by
     "why the whole link". The full text stays in the tooltip. */
@@ -66,18 +122,97 @@
                padding:.8rem .85rem;font:inherit}
  .urlrow input:focus{outline:none;border-color:#c8a24a}
  .urlrow button{width:auto;flex:0 0 auto;margin-top:0;padding:.8rem 1.4rem}
- .sing{border-top:1px solid #1e222a;padding:.9rem 0 .6rem}
- .sing .hd{font-weight:600;font-size:1.05rem}
- .sing .meta{color:#7d848c;font-size:.88rem;margin:.25rem 0 .6rem;line-height:1.45}
- .sing button.go{width:auto;padding:.5rem 1.1rem;font-size:.95rem}
- .vid{border-top:1px solid #1e222a;padding:.85rem 0}
- .vid .top{display:flex;align-items:baseline;gap:.6rem}
- .vid .n{font-weight:600;font-size:1.05rem}
- .vid .d{color:#7d848c;font-size:.85rem;margin-bottom:.5rem}
+ /* --- the three doors ------------------------------------------------------
+    A finished song is not a list of files, it is three things you can DO with
+    it, and they are different things: perform it and be scored, sing along to
+    a screen with nobody listening, or watch the record itself. They used to be
+    three identical grey rows in a stack of fourteen, indistinguishable from the
+    piano stem, and that is exactly what Bruno was pointing at.
+
+    Von Restorff: exactly ONE of these is isolated. Sing-it is filled and gold
+    and taller; the other two are consistent with each other and quieter. If
+    all three were emphasised none of them would be. */
+ .titleblock{margin:var(--s-5) 0 var(--s-4)}
+ /* text-transform:none is not belt-and-braces. The global h2 rule uppercases,
+    and a song title in caps reads as a banner shouting a filename, which is
+    within one word of the thing he already objected to twice. */
+ .titleblock .t{font-size:var(--t-display);font-weight:700;line-height:1.15;
+                letter-spacing:-.02em;margin:0 0 var(--s-1);
+                text-transform:none;color:var(--ink);
+                overflow-wrap:anywhere;
+                display:-webkit-box;-webkit-box-orient:vertical;
+                -webkit-line-clamp:3;overflow:hidden}
+ .titleblock .m{color:var(--ink-3);font-size:var(--t-cap);
+                display:flex;flex-wrap:wrap;gap:0 .5rem;align-items:center}
+ .titleblock .m i{font-style:normal;color:var(--line)}
+
+ .doors{display:flex;flex-direction:column;gap:var(--s-3)}
+ .door{position:relative;border:1px solid var(--line);border-radius:var(--r-lg);
+       background:var(--panel);padding:var(--s-3);overflow:hidden;
+       transition:border-color .2s var(--ease),transform .2s var(--ease),
+                  background .2s var(--ease)}
+ .door .k{font-size:.72rem;font-weight:700;letter-spacing:.12em;
+          text-transform:uppercase;color:var(--ink-3);margin-bottom:var(--s-1)}
+ .door .t{font-size:var(--t-title);font-weight:650;letter-spacing:-.01em}
+ .door .s{color:var(--ink-2);font-size:var(--t-cap);line-height:1.5;
+          margin-top:.2rem;max-width:30rem}
+ .door .cta{margin-top:var(--s-3);display:flex;gap:var(--s-2);
+            align-items:center;flex-wrap:wrap}
+ .door button{width:auto;margin:0;padding:.7rem 1.25rem;border-radius:var(--r-sm)}
+ .door button.ghost{background:transparent;color:var(--ink);
+                    border:1px solid var(--line);font-weight:600}
+ .door button.ghost:hover{border-color:var(--gold-dim);color:var(--gold)}
+
+ /* the one that is different */
+ .door.primary{border-color:var(--gold-dim);
+   background:radial-gradient(120% 140% at 0% 0%,#1e1a10 0%,var(--panel-2) 55%)}
+ .door.primary .k{color:var(--gold)}
+ .door.primary .t{font-size:1.35rem;font-weight:700}
+ @media (hover:hover){
+   .door:hover{border-color:#31394a;transform:translateY(-1px)}
+   .door.primary:hover{border-color:var(--gold)}
+ }
+
+ /* the karaoke door carries a preview of the words, in the colours they will
+    actually wipe in, because "karaoke" as a word on a button says nothing
+    about what you get. */
+ .door .peek{margin-top:var(--s-3);border-radius:var(--r-md);
+             background:#0a0c0f;border:1px solid #171b22;padding:.85rem .9rem;
+             font-weight:700;font-size:.95rem;line-height:1.35;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .door .peek em{font-style:normal;color:var(--gold)}
+ .door .peek span{color:#fff;opacity:.55}
+
  /* max-width, not width: a 360p capture blown up to the column width is
     softer than the source and looks like the tool degraded it. */
- .vid video{width:100%;max-width:100%;border-radius:8px;background:#000;
-            display:block;margin-bottom:.4rem}
+ .door video{width:100%;max-width:100%;border-radius:var(--r-md);background:#000;
+             display:block;margin-top:var(--s-3)}
+ .door .why{margin:var(--s-2) 0 0;padding:0;border:0;font-size:var(--t-cap)}
+
+ /* --- everything that is not a door ----------------------------------------
+    The stems are the workings, not the dish. Seven expanded audio players were
+    the visual mass of this page and pushed the videos into the middle of a
+    scroll. Nothing is removed; it is one tap away. */
+ .pack{margin-top:var(--s-4);border:1px solid var(--line);
+       border-radius:var(--r-lg);background:var(--panel);overflow:hidden}
+ .pack>summary{cursor:pointer;padding:.95rem var(--s-3);font-weight:600;
+               list-style:none;display:flex;align-items:center;gap:.6rem}
+ .pack>summary::-webkit-details-marker{display:none}
+ .pack>summary .cnt{color:var(--ink-3);font-weight:400;font-size:var(--t-cap)}
+ .pack>summary .chev{margin-left:auto;color:var(--ink-3);
+                     transition:transform .2s var(--ease)}
+ .pack[open]>summary .chev{transform:rotate(90deg)}
+ .pack[open]>summary{border-bottom:1px solid var(--line)}
+ .pack .in{padding:0 var(--s-3) var(--s-3)}
+
+ .shareline{display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;
+            margin-top:var(--s-4)}
+ .shareline button{width:auto;margin:0;padding:.55rem 1rem;
+                   border-radius:var(--r-sm)}
+ .shareline span{color:var(--ink-3);font-size:var(--t-cap)}
+ button.ghost{background:transparent;color:var(--ink);
+              border:1px solid var(--line);font-weight:600}
+ button.ghost:hover{border-color:var(--gold-dim);color:var(--gold)}
 
  /* --- the ready room -------------------------------------------------------
     A karaoke stage, not a row in a list. Bruno: "When i put record. It should
@@ -106,6 +241,26 @@
  .stage.replaying .lyr .prev,.stage.replaying .lyr .next{
                    font-size:.92rem;min-height:1.2em;margin:.15rem 0}
  .stage .foot{flex:0 0 auto}
+
+ /* --- karaoke, which is NOT the ready room ---------------------------------
+    Same words, same clock, deliberately different experience. No microphone
+    permission, no count-in, no recorder, no score, and you may pause and scrub
+    because nobody is being measured. The stage is an audition; this is singing
+    in your kitchen. They share paintLines() and the backing-track clock and
+    nothing else.
+
+    Bigger words too: with no meter and no ribbon competing for the screen,
+    the lyric is allowed to be the whole thing. */
+ .stage.karaoke .lyr{max-width:44rem}
+ .stage.karaoke .lyr .cur{font-size:clamp(1.7rem,7.5vw,2.6rem);margin:1rem 0}
+ .stage.karaoke .lyr .prev,.stage.karaoke .lyr .next{
+        font-size:clamp(1rem,4vw,1.3rem);opacity:.28;margin:.6rem 0}
+ .stage .transport{display:flex;align-items:center;gap:var(--s-3);
+                   margin-top:.6rem}
+ .stage .transport button{width:auto;margin:0;flex:0 0 auto;
+                          border-radius:999px;padding:.75rem 1.4rem}
+ .stage .transport .prog{flex:1 1 auto;margin:0;cursor:pointer;height:6px}
+ .stage .transport .prog:hover i{background:#e9c56a}
 
  /* the lyric column */
  .lyr{width:100%;max-width:34rem}
@@ -174,28 +329,44 @@
  .words .meta{color:#7d848c;font:12.5px ui-monospace,monospace;margin-top:.2rem}
 </style>
 <main>
-<h1>earshot</h1>
-<p class=sub>Put a song in. Take it apart.</p>
+<header class=hero>
+  <h1>earshot</h1>
+  <p class=sub>Put a song in. Take it apart, sing on it, or watch it with
+    the words.</p>
+</header>
 
-<label class=drop id=drop for=file>
-  <b id=dropname>Choose an mp3</b><br>
-  <span>or drop one here &mdash; any audio or video, under __MAX_MB__ MB and __MAX_MIN__ minutes</span>
-  <input id=file type=file>
-</label>
+<!-- One card, two ways in, the link first because it is the one that gets
+     used. Everything that was here before is still here; what changed is that
+     a file picker, a URL box, two paragraphs of explanation and a disabled
+     button no longer read as five unrelated things stacked down a page. -->
+<div class=start>
+  <div class=field>
+    <label class=lbl for=url>Paste a link</label>
+    <div class=urlrow>
+      <input id=url type=url autocomplete=off spellcheck=false
+             placeholder="https://www.youtube.com/watch?v=...">
+      <button id=golink>Fetch</button>
+    </div>
+    <p class=note id=urlnote>Fetched through the Internet Archive, because this
+    machine cannot reach YouTube directly. It only works for videos the archive
+    kept a copy of, and it checks before downloading so you find out in two
+    seconds rather than after the wait.</p>
+  </div>
 
-<p class=note style="text-align:center;margin:.9rem 0 .5rem">or paste a link</p>
-<div class=urlrow>
-  <input id=url type=url autocomplete=off spellcheck=false
-         placeholder="https://www.youtube.com/watch?v=...">
-  <button id=golink>Fetch</button>
+  <div class=or><span>or</span></div>
+
+  <div class=field>
+    <label class=drop id=drop for=file>
+      <b id=dropname>Choose a file</b>
+      <span>or drop one here &mdash; any audio or video, under __MAX_MB__ MB
+        and __MAX_MIN__ minutes</span>
+      <input id=file type=file>
+    </label>
+    <button id=go disabled>Pull it apart</button>
+  </div>
 </div>
-<p class=note id=urlnote style="margin:.45rem 0 0">Fetched through the Internet
-Archive, because this machine cannot reach YouTube directly. It only works for
-videos the archive kept a copy of, and it checks before downloading so you find
-out in two seconds rather than after the wait.</p>
 
-<button id=go disabled>Pull it apart</button>
-<p class=note style="margin-top:.6rem">Everything the model can find is
+<p class=note style="margin-top:var(--s-3)">Everything the model can find is
 separated in one pass, so there is nothing to choose up front. What it found
 comes back below.</p>
 
@@ -210,7 +381,12 @@ comes back below.</p>
 </div>
 
 <div id=result hidden>
-  <p class=verdict id=verdict></p>
+  <!-- Title, then what you can DO with it, then the workings. The verdict
+       ("music with a voice in it") used to be the page's only heading; it is
+       still here, in the meta line under the title, where it describes the
+       thing rather than announcing it. -->
+  <div class=titleblock id=titleblock></div>
+  <div class=doors id=doors></div>
   <div id=stems></div>
   <p class=note id=foot></p>
 </div>
@@ -244,6 +420,16 @@ piano stem from a song with no piano is a real output and a useless one.</p>
 <script>
 const $ = s => document.querySelector(s);
 let picked = null, jobId = null;
+
+const mmss = t => (t < 0 || !isFinite(t)) ? '0:00'
+  : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+
+// Titles and lyric lines arrive from a fetched file and go into innerHTML.
+// They are the user's own material, and a song called `<img onerror>` is a
+// perfectly legal thing to upload. Declared up here, not beside the stage
+// code, because poll() runs on load and uses both.
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // The job id lives in the URL. That is the whole of "come in and out of the
 // app": close the tab, lock the phone, open the link tomorrow, and the page
@@ -311,6 +497,19 @@ if (location.hash.length > 1) {
   poll();
 }
 showSaved();
+
+// The overlay's close button is a static element, so it is wired once here
+// rather than inside whichever door happened to render. It used to be wired
+// only in wireSing(), so a job with a backing track but no separated vocal
+// would have opened the sing-along onto a screen with no way out.
+document.getElementById('stagex').onclick = () => closeStage(true);
+document.addEventListener('keydown', e => {
+  // Not while a take is running. Escape is one key away from a lot of other
+  // keys, and closing mid-recording throws the performance away on purpose.
+  // The X is still there for someone who means it.
+  if (e.key === 'Escape' && $stage().classList.contains('on')
+      && stageState !== 'singing' && stageState !== 'counting') closeStage(true);
+});
 
 function setFile(f) {
   if (!f) return;
@@ -405,49 +604,59 @@ async function poll() {
     $('#fill').style.width = '100%';
     $('#running').hidden = true; $('#result').hidden = false; $('#go').disabled = false;
     const v = d.verdict || {};
-    $('#verdict').textContent = v.kind || 'what came out';
     // Voice first and always, then whatever is actually playing, then the rest.
     const order = ['vocals', 'band', 'drums', 'bass', 'guitar', 'piano', 'other'];
     const label = n => n === 'band' ? (v.band_means || 'everything but the voice')
                      : n === 'vocals' ? 'voice' : n;
-    // The videos come FIRST when there are any, because for a link they are
-    // the thing that was asked for and the stems are the workings. A page that
-    // opens with seven audio files and hides the video below them is the
-    // ingredients-instead-of-the-dish mistake all over again, in CSS.
-    const rows = [];
 
-    // SING ON IT. Only offered when there is a separated voice to measure a
+    // --- the title, and what the thing is -----------------------------------
+    const meta = [v.kind, d.source, d.duration ? mmss(d.duration) : null]
+                 .filter(Boolean).join(' <i>·</i> ');
+    const title = d.title || 'your track';
+    $('#titleblock').innerHTML =
+      `<h2 class=t title="${esc(title)}">${esc(title)}</h2>
+       <div class=m>${meta}</div>`;
+
+    // --- the three doors ----------------------------------------------------
+    // Three different things you can do with a finished song, and they are
+    // genuinely different experiences rather than three rows that happen to
+    // hold different files. See the CSS block for why they look unalike.
+    const doors = [];
+    const canSing = d.found && d.found.vocals && d.found.band;
+    const V = d.videos || {};
+
+    // 1. PERFORM IT. Only offered when there is a separated voice to measure a
     // room from, because that is the whole method: the singer's reverb tail is
     // sitting in the gaps between their phrases once the vocal is on its own.
-    const canSing = d.found && d.found.vocals && d.found.band;
-    if (canSing) rows.push(singPanel(d));
+    if (canSing) doors.push(singDoor(d));
 
-    const V = d.videos;
-    if (V && V.with_voice) {
-      const one = (file, title, sub) => `<div class=vid>
-        <div class=top><span class=n>${title}</span></div>
-        <div class=d>${sub}</div>
+    // 2. SING ALONG. No microphone, no score, the words on the whole screen.
+    // Needs word timings that were checked against the audio -- a highlighter
+    // landing on the wrong syllable is worse than no highlighter.
+    doors.push(karaokeDoor(d, V));
+
+    // 3. THE RECORD ITSELF.
+    if (V.with_voice) {
+      doors.push(`<div class=door>
+        <div class=k>The record</div>
+        <div class=t>Watch it with the words</div>
+        <div class=s>The original, as it was, with the singing subtitled
+          ${V.cues ? 'across ' + V.cues + ' lines ' : ''}off the isolated vocal
+          &mdash; so the timing is the recording's own, not a guess.</div>
         <video controls playsinline preload=metadata
-               src="/jobs/${jobId}/${file}"></video>
-        <a class=dl href="/jobs/${jobId}/${file}" download>Download</a></div>`;
-      rows.push(one(V.with_voice, 'With the voice',
-                    'the original, subtitled'));
-      if (V.no_voice) rows.push(one(V.no_voice, 'Without the voice',
-                    'sing this one'));
-      if (V.subtitles) {
-        rows.push(`<div class=note>Subtitles are burned in
-          ${V.cues ? '(' + V.cues + ' lines)' : ''}, read off the isolated
-          vocal, so the timing is the recording's own.</div>`);
-      } else if (V.why_no_subtitles) {
-        // Says which of the two videos exist and that they are fine, because
-        // "no subtitles" on its own reads as "the whole thing failed".
-        rows.push(`<div class=note>No subtitles on these:
-          ${V.why_no_subtitles}. The videos themselves are fine.</div>`);
-      }
-    } else if (V && V.why) {
-      rows.push(`<div class=note>The videos did not build (${V.why}).
-        The stems below are unaffected.</div>`);
+               poster="/jobs/${jobId}/poster.jpg"
+               src="/jobs/${jobId}/${V.with_voice}"></video>
+        <a class=dl href="/jobs/${jobId}/${V.with_voice}" download>Download the video</a>
+        </div>`);
+    } else if (V.why) {
+      doors.push(`<div class=door><div class=k>The record</div>
+        <div class=t>The videos did not build</div>
+        <div class=s>${esc(V.why)}. The stems below are unaffected.</div></div>`);
     }
+    $('#doors').innerHTML = doors.join('');
+
+    // --- the workings, one tap away ----------------------------------------
+    const rows = [];
     rows.push(...order.filter(n => d.found && d.found[n]).map(n => {
       const f = d.found[n];
       const lvl = (f.db === null || f.db === undefined) ? 'silent' : f.db + ' dB';
@@ -493,11 +702,38 @@ async function poll() {
         <div class=meta>the singing could not be read, so there is no
           highlighter. The stems above are unaffected.</div></div>`);
     }
-    $('#stems').innerHTML = rows.join('');
+    // Folded, not removed. Seven expanded audio players were the visual mass
+    // of this page and pushed the videos into the middle of a scroll; every
+    // one of them is still here, and still downloadable, one tap in.
+    const nStems = order.filter(n => d.found && d.found[n]).length;
+    $('#stems').innerHTML = `<details class=pack>
+      <summary>Take it apart
+        <span class=cnt>${nStems} stem${nStems === 1 ? '' : 's'}${
+          L && L.count ? ', and the words' : ''}</span>
+        <span class=chev>&rsaquo;</span></summary>
+      <div class=in>${rows.join('')}</div></details>`;
     if (canSing) wireSing(d);
-    $('#foot').textContent =
-      `took ${Math.round(d.elapsed)}s. kept in S3 — this link keeps working: `
-      + location.origin + '/#' + jobId;
+    wireKaraoke(d);
+    // The share line used to end in the URL itself, pasted into a sentence.
+    // "Why the whole link" was his complaint about a title; a raw address in
+    // running text is the same thing one screen down. The link is a control
+    // now, and the address is what gets copied rather than what gets read.
+    const share = location.origin + '/#' + jobId;
+    $('#foot').innerHTML = `<span class=shareline>
+        <button class="go ghost" id=copylink>Copy link</button>
+        <span>Kept, so this link keeps working. Took
+          ${Math.round(d.elapsed)}s.</span></span>`;
+    document.getElementById('copylink').onclick = async e => {
+      const b = e.currentTarget;
+      try { await navigator.clipboard.writeText(share); b.textContent = 'Copied'; }
+      catch (err) {
+        // No clipboard permission, or an insecure context. Show the address
+        // rather than failing silently, which is what a dead button looks like.
+        b.textContent = 'Copied';
+        prompt('Copy this link', share);
+      }
+      setTimeout(() => { b.textContent = 'Copy link'; }, 2000);
+    };
     remember(jobId, (d.found && Object.keys(d.found).length) ? undefined : undefined);
     showSaved();
     return;
@@ -527,13 +763,21 @@ let stageWords = null, stageRaf = null, audioCtx = null, analyser = null,
     micStream = null, stageState = 'idle';
 
 const $stage = () => document.getElementById('stage');
-const mmss = t => (t < 0 || !isFinite(t)) ? '0:00'
-  : Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
 
-function singPanel(d) {
+// The PERFORM door. Every state the old panel had is still here; what changed
+// is that they are states of one door rather than up to four sibling rows that
+// looked like the stems underneath them.
+function singDoor(d) {
   const L = d.liveroom || {};
+  const shell = (kind, title, sub, cta, extra) =>
+    `<div class="door primary"><div class=k>${kind}</div>
+     <div class=t>${title}</div><div class=s>${sub}</div>
+     ${cta ? `<div class=cta>${cta}</div>` : ''}${extra || ''}</div>`;
+
   if (L.state === 'done') {
-    const one = (f, t, sub) => `<div class=vid>
+    // Your own takes belong to the performing experience, so they live inside
+    // this door rather than as two more rows in a list of files.
+    const one = (f, t, sub) => `<div class=stem>
       <div class=top><span class=n>${t}</span></div>
       <div class=d>${sub}</div>
       <audio controls preload=metadata src="/jobs/${jobId}/${f}"></audio>
@@ -544,45 +788,105 @@ function singPanel(d) {
     // unreachable, which is the same failure as two projects with the same
     // name, one screen further in.
     const U = d.unison || {};
-    let scored = '';
+    let head = 'You sang this one', sub = '', cta = '';
     if (U.state === 'done') {
-      scored = `<div class=sing><div class=hd>How close you were</div>
-        <div class=said style="font-size:1.05rem">${U.headline}</div>
-        <div class=lines2>
-          ${U.best ? `Best line: <b>${U.best.text}</b>, ${Math.round(U.best.cents)} cents out.` : ''}
-          ${U.worst ? `<br>Sing again: <b class=bad>${U.worst.text}</b>,
-             ${Math.round(U.worst.cents)} cents
-             ${U.worst.signed < 0 ? 'flat' : 'sharp'}.` : ''}</div>
-        <button class=go id=watchback>Watch it back</button></div>`;
+      head = esc(U.headline);
+      sub = `${U.best ? `Best line: <b>${esc(U.best.text)}</b>,
+               ${Math.round(U.best.cents)} cents out.` : ''}
+             ${U.worst ? `<br>Sing again: <b class=bad>${esc(U.worst.text)}</b>,
+               ${Math.round(U.worst.cents)} cents
+               ${U.worst.signed < 0 ? 'flat' : 'sharp'}.` : ''}`;
+      cta = `<button class=go id=watchback>Watch it back</button>
+             <button class="go ghost" id=singgo>Sing it again</button>`;
     } else if (U.state === 'refused') {
-      scored = `<div class=sing><div class=hd>No score for this one</div>
-        <div class=meta>${U.why}</div></div>`;
+      head = 'No score for this one';
+      sub = esc(U.why);
+      cta = `<button class=go id=singgo>Sing it again</button>`;
+    } else {
+      cta = `<button class=go id=singgo>Sing it again</button>`;
     }
-    return scored + `<div class=sing><div class=hd>You, on the record</div>
-      <div class=meta>the record's room measures ${L.record_tail}s, yours
-        measured ${L.take_tail}s, so you were put in a ${r.rt60}s
-        ${r.tilt} one${L.placed_lufs != null ? ' at ' + L.placed_lufs + ' LUFS' : ''}</div>
-      <button class=go id=singgo>Sing it again</button>
-      </div>` + one(L.unplaced, 'Just you on top', 'the take as recorded')
-             + one(L.placed, 'You in their room', 'same take, placed');
+    // "Watch it back" plays the placed mix with the ribbon over it, which is
+    // the good way to hear a take. These two are the raw artefacts and they
+    // are genuinely different from each other, so neither is dropped -- but
+    // two native audio pills in the hero card were the loudest 2010 thing on
+    // the page, and they were a worse version of the button above them.
+    const takes = `<details class="pack" style="margin-top:.9rem">
+      <summary>Your two mixes <span class=cnt>as recorded, and placed</span>
+        <span class=chev>&rsaquo;</span></summary>
+      <div class=in>
+        <div class=s style="margin:.6rem 0 .2rem">The record's room measures
+          ${L.record_tail}s, yours measured ${L.take_tail}s, so you were put in
+          a ${r.rt60}s ${r.tilt} one${
+          L.placed_lufs != null ? ' at ' + L.placed_lufs + ' LUFS' : ''}.</div>
+        ${one(L.unplaced, 'Just you on top', 'the take as recorded')}
+        ${one(L.placed, 'You in their room', 'same take, placed')}
+      </div></details>`;
+    return shell('Your take', head, sub, cta, takes);
+  }
+  // The take's audio has been swept. The SCORE survives, because it lives in
+  // status.json rather than in a file, so the thing worth keeping is still
+  // here -- but there is nothing left to play back and the page must not
+  // pretend otherwise.
+  if (L.state === 'gone') {
+    const U = d.unison || {};
+    return shell('Your take',
+      U.state === 'done' ? esc(U.headline) : 'You sang this one',
+      `${U.state === 'done' && U.worst
+         ? `Sing again: <b class=bad>${esc(U.worst.text)}</b>,
+            ${Math.round(U.worst.cents)} cents
+            ${U.worst.signed < 0 ? 'flat' : 'sharp'}.<br>` : ''}
+       ${esc(L.why || 'the recording was cleared')}, so there is nothing left
+       to play back. The score is kept.`,
+      `<button class=go id=singgo>Sing it again</button>`);
   }
   if (L.state === 'refused')
-    return `<div class=sing><div class=hd>Not this take</div>
-      <div class=meta>${L.why}</div>
-      <button class=go id=singgo>Record another one</button></div>`;
+    return shell('Perform it', 'Not this take', esc(L.why),
+      `<button class=go id=singgo>Record another one</button>`);
   if (L.state === 'queued' || L.state === 'working')
-    return `<div class=sing><div class=hd>Placing you in the room</div>
-      <div class=meta>${L.stage || 'starting'}&hellip;</div></div>`;
+    return shell('Perform it', 'Placing you in the room',
+      `${esc(L.stage || 'starting')}&hellip;`, '');
   if (L.state === 'failed')
-    return `<div class=sing><div class=hd>That did not work</div>
-      <div class=meta>${L.why || 'unknown'}</div>
-      <button class=go id=singgo>Try again</button></div>`;
-  return `<div class=sing>
-    <div class=hd>Sing on it</div>
-    <div class=meta>Headphones on, and stand somewhere with soft things in it.
-      The backing plays while you sing; if it gets into the microphone this
-      cannot measure anything and will say so.</div>
-    <button class=go id=singgo>Sing on it</button></div>`;
+    return shell('Perform it', 'That did not work', esc(L.why || 'unknown'),
+      `<button class=go id=singgo>Try again</button>`);
+  return shell('Perform it', 'Sing on it, and hear how close you were',
+    `Headphones on, and stand somewhere with soft things in it. The backing
+     plays while you sing, and afterwards you get your pitch line drawn over
+     theirs. If the backing gets into the microphone this cannot measure
+     anything, and it will say so rather than guess.`,
+    `<button class=go id=singgo>Sing on it</button>`);
+}
+
+// The SING ALONG door. Deliberately the quiet one: nobody is listening, nothing
+// is uploaded, and the only thing it needs is words whose timing was checked
+// against the audio.
+function karaokeDoor(d, V) {
+  const L = d.lyrics || {};
+  const has = L.count && L.timings_usable !== false && d.found && d.found.band;
+  const dl = V.no_voice
+    ? `<a class=dl href="/jobs/${jobId}/${V.no_voice}" download>Download the karaoke video</a>`
+    : '';
+  if (!has) {
+    // Says what is missing and what still works. "No karaoke" on its own reads
+    // as the whole job having failed.
+    const why = L.timings_usable === false
+      ? `the words came back but they do not line up with the singing
+         (${L.alignment_db} dB, needs 3), and a highlighter landing on the wrong
+         syllable is worse than none`
+      : (L.count ? 'there is no backing track for this one'
+                 : 'the singing could not be read, so there are no words to follow');
+    return `<div class=door><div class=k>Sing along</div>
+      <div class=t>No words to follow on this one</div>
+      <div class=s>${why}.${V.no_voice ? ' The backing video is still here.' : ''}</div>
+      ${dl ? `<div class=cta>${dl}</div>` : ''}</div>`;
+  }
+  return `<div class=door><div class=k>Sing along</div>
+    <div class=t>Just the words and the band</div>
+    <div class=s>No microphone, no recording, nothing scored. The singer is
+      taken out, the words fill the screen and wipe as they are sung, and you
+      can pause it whenever you like.</div>
+    <div class=peek id=peek><span>&hellip;</span></div>
+    <div class=cta><button class=go id=karaokego>Sing along</button>${dl}</div>
+    </div>`;
 }
 
 function wireSing(d) {
@@ -596,6 +900,106 @@ function wireSing(d) {
   if (go) go.onclick = () => openStage(d);
   const x = document.getElementById('stagex');
   if (x) x.onclick = () => closeStage(true);
+}
+
+// --- sing along -------------------------------------------------------------
+//
+// The same words and the same backing-track clock as the ready room, and
+// nothing else in common. No getUserMedia, so no permission prompt; no
+// count-in, because there is no take to start; no MediaRecorder and no upload,
+// because nothing is being kept; and you may pause and scrub, which you cannot
+// do to a performance.
+//
+// Bruno, 2026-09-04: "make sure to have like a different experience for the
+// sing along or like u know videos with and without voice." They used to be
+// three identical rows. The stage is an audition. This is a kitchen.
+
+async function loadWords(d) {
+  if (stageWords) return stageWords;
+  const L = d.lyrics;
+  if (!(L && L.file && L.timings_usable)) return null;
+  try {
+    const j = await (await fetch('/jobs/' + jobId + '/' + L.file)).json();
+    stageWords = buildLines(j.words || []);
+  } catch (e) { stageWords = null; }
+  return stageWords;
+}
+
+async function wireKaraoke(d) {
+  const go = document.getElementById('karaokego');
+  if (!go) return;
+  go.onclick = () => openKaraoke(d);
+  // Fill the preview with the song's real first line. A button labelled
+  // "karaoke" says nothing about what arrives; the words in the colours they
+  // will wipe in do.
+  const w = await loadWords(d);
+  const peek = document.getElementById('peek');
+  if (peek && w && w.length) {
+    const words = w[0].words.map(x => x.word);
+    const lead = Math.max(1, Math.ceil(words.length / 3));
+    peek.innerHTML = `<em>${esc(words.slice(0, lead).join(' '))}</em>
+      <span>${esc(words.slice(lead).join(' '))}</span>`;
+  } else if (peek) {
+    peek.remove();
+  }
+}
+
+async function openKaraoke(d) {
+  const st = $stage();
+  document.getElementById('stagettl').textContent = d.title || 'sing along';
+  st.classList.add('on', 'karaoke');
+  stageState = 'karaoke';
+  await loadWords(d);
+
+  document.getElementById('stagebody').innerHTML = `<div class=lyr id=lyr></div>`;
+  document.getElementById('stagefoot').innerHTML = `
+    <div class=transport>
+      <button class=go id=kplay>Play</button>
+      <div class=prog id=kbar><i id=pfill></i></div>
+      <span class=clock style="display:block"><span id=pclock>0:00</span></span>
+    </div>`;
+
+  bandEl = new Audio('/jobs/' + jobId + '/' + d.found.band.file);
+  const btn = document.getElementById('kplay');
+  const paint = () => { btn.textContent = bandEl && bandEl.paused ? 'Play' : 'Pause'; };
+  bandEl.onended = () => { paint(); };
+  btn.onclick = () => {
+    if (!bandEl) return;
+    if (bandEl.paused) { bandEl.play(); karaokeLoop(); } else { bandEl.pause(); }
+    paint();
+  };
+  // Scrub. Allowed here precisely because nothing is being measured: the whole
+  // point of this door is that you can go back and do the chorus again.
+  document.getElementById('kbar').onclick = e => {
+    if (!bandEl || !bandEl.duration) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    bandEl.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))
+                         * bandEl.duration;
+    // Paint straight away rather than waiting for the loop. Seeking while
+    // PAUSED moved the audio and left the clock and the bar reading whatever
+    // they said before, which looks exactly like a scrub that did nothing --
+    // and that is how it read the first time I drove it.
+    karaokePaint();
+  };
+  karaokePaint();
+}
+
+// The drawing, separated from the running, so a seek can repaint with the
+// transport stopped.
+function karaokePaint() {
+  if (!bandEl) return;
+  const t = bandEl.currentTime, dur = bandEl.duration || 0;
+  const fill = document.getElementById('pfill');
+  if (fill && dur) fill.style.width = (100 * t / dur) + '%';
+  const clock = document.getElementById('pclock');
+  if (clock) clock.textContent = mmss(t) + (dur ? ' / ' + mmss(dur) : '');
+  paintLines(t);
+}
+
+function karaokeLoop() {
+  if (stageState !== 'karaoke' || !bandEl) return;
+  karaokePaint();
+  if (!bandEl.paused) stageRaf = requestAnimationFrame(karaokeLoop);
 }
 
 // --- the ready room ---------------------------------------------------------
@@ -799,7 +1203,7 @@ function stopSing() {
 
 function closeStage(hard) {
   const st = $stage();
-  if (st) { st.classList.remove('on'); st.classList.remove('replaying'); }
+  if (st) st.classList.remove('on', 'replaying', 'karaoke');
   if (replayAudio) { replayAudio.pause(); replayAudio = null; }
   if (stageRaf) { cancelAnimationFrame(stageRaf); stageRaf = null; }
   if (bandEl) { bandEl.pause(); bandEl = null; }
@@ -907,9 +1311,17 @@ async function renderReplay(d) {
     <button class=go id=replaygo>Play it back</button>
     <button class=go id=singmore style="background:#2a2f38;color:#e7e3dc">Sing it again</button>`;
 
-  const src = L.placed ? `/jobs/${jobId}/${L.placed}` : null;
+  const src = (L.state === 'done' && L.placed) ? `/jobs/${jobId}/${L.placed}` : null;
   replayAudio = src ? new Audio(src) : null;
-  document.getElementById('replaygo').onclick = () => {
+  const rgo = document.getElementById('replaygo');
+  if (!replayAudio) {
+    // Silence with no explanation is the worst version of this. It used to
+    // return early and do nothing at all, which is indistinguishable from a
+    // button that is broken.
+    rgo.disabled = true;
+    rgo.textContent = 'The recording was cleared';
+  }
+  rgo.onclick = () => {
     if (!replayAudio) return;
     if (!replayAudio.paused) { replayAudio.pause(); return; }
     replayAudio.play();

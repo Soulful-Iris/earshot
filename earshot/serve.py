@@ -391,6 +391,50 @@ class Handler(BaseHTTPRequestHandler):
     def _who(self) -> str:
         return self.headers.get("CF-Connecting-IP") or self.client_address[0]
 
+    def _poster(self, jid: str, d: Path, st: dict) -> None:
+        """One frame out of the finished video, so the player is not a black box.
+
+        A <video> with no poster paints nothing until it is played, and on the
+        page that reads as an encode that failed rather than a video waiting to
+        be tapped. `#t=1` in the src makes some browsers seek and paint, and I
+        cannot check which ones from this machine, so this does it server-side
+        where the answer is the same everywhere.
+
+        The source is the with-voice video **named in our own status file**,
+        never a name from the URL, same rule as every other file here. Cached
+        next to it; regenerated from S3 if the job was swept locally.
+        """
+        name = (st.get("videos") or {}).get("with_voice")
+        if not name:
+            self._send(404, b"no", "text/plain")
+            return
+        out = d / "out" / "poster.jpg"
+        if not out.is_file():
+            src = d / "out" / name
+            if not src.is_file() and studio.fetch_s3(jid, name, src) is None:
+                self._send(404, b"no", "text/plain")
+                return
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-nostdin", "-v", "error", "-y",
+                     "-ss", "1", "-i", str(src), "-frames:v", "1",
+                     "-vf", "scale=640:-2", "-q:v", "5", str(out)],
+                    capture_output=True, timeout=60, check=True)
+            except Exception:
+                # A missing poster is cosmetic. It must never be the reason a
+                # finished job looks broken, so this fails quietly to no-image
+                # rather than to a 500 in the middle of the page.
+                self._send(404, b"no", "text/plain")
+                return
+        body = out.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _studio_page(self) -> bytes:
         html = (Path(__file__).resolve().parent / "studio.html").read_text()
         return (html.replace("__MAX_MB__", str(studio.MAX_MB))
@@ -427,6 +471,9 @@ class Handler(BaseHTTPRequestHandler):
             # from the URL, so no path from outside chooses what gets served.
             wanted = rest[1]
             st = studio.Job(jid, d).status
+            if wanted == "poster.jpg":
+                self._poster(jid, d, st)
+                return
             allowed = set((st.get("parts") or {}).values())
             # The two videos, same rule as the stems: the name comes from our
             # own status file, never from the URL.
