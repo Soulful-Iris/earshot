@@ -856,7 +856,18 @@ function singDoor(d) {
     let head = 'You sang this one', sub = '', cta = '';
     if (U.state === 'done') {
       head = esc(U.headline);
-      sub = `${U.best ? `Best line: <b>${esc(U.best.text)}</b>,
+      // Timing sits on its OWN line, not appended to the pitch sentence.
+      // Being flat and being late are different mistakes with different
+      // fixes, and running them together as one verdict is the thing this
+      // was built to stop.
+      const T = U.timing;
+      sub = `${U.timing_headline
+               ? `<b>${esc(U.timing_headline)}</b>${
+                   T && T.worst && Math.abs(T.worst.late_ms) > 46
+                   ? ` &middot; furthest out on <b class=bad>${esc(T.worst.text)}</b>,
+                       ${Math.abs(Math.round(T.worst.late_ms))} ms
+                       ${T.worst.late_ms > 0 ? 'behind' : 'early'}` : ''}<br>` : ''}
+             ${U.best ? `Best line: <b>${esc(U.best.text)}</b>,
                ${Math.round(U.best.cents)} cents out.` : ''}
              ${U.worst ? `<br>Sing again: <b class=bad>${esc(U.worst.text)}</b>,
                ${Math.round(U.worst.cents)} cents

@@ -82,6 +82,47 @@ MAX_SHIFT = 20
 # Inside this, you were on the note. It is also the fill threshold on the ribbon.
 ON_NOTE_CENTS = 50.0
 
+# --- timing -----------------------------------------------------------------
+#
+# Bruno, 2026-09-05: "you have to make sure im on the correct tempo with the
+# lyrics"
+#
+# He is right that nothing here could tell him. The global `offset()` search
+# does not measure timing, it DELETES it: one shift for the whole take, found
+# once and subtracted so that headphone latency is not scored as flat singing.
+# Every line is then compared at that one alignment, and any per-line drift is
+# folded into the pitch number as though it were tuning.
+#
+# So the timing is the RESIDUAL: run the same search again inside each line, on
+# windows the global shift has already aligned. What is left is how early or
+# late that line was against his own baseline, which is the only version of the
+# question that is his fault rather than his hardware's.
+#
+# WHICH OBSERVABLE, measured rather than assumed. I expected pitch matching to
+# be poor per line -- sliding a window over a sustained note barely changes the
+# pitch difference -- and expected a voiced-envelope onset correlation to beat
+# it. Planted known per-line delays into four real vocal stems:
+#
+#     within 1 frame      pitch          onset
+#     4 songs, 129 lines  127 (98.4%)    116 (89.9%)
+#
+# Pitch won, so this reuses `offset()` rather than adding a second mechanism.
+#
+# AND THE FIRST CONTROL WAS BROKEN, which is why those are the second numbers.
+# It planted delays by overwriting each voiced run with a shifted slice of
+# itself, so `voiced` stayed all-True and THE ONSETS NEVER MOVED. It then
+# reported that the onset estimator could not recover the delays: true, and
+# meaningless, because there was nothing in the signal it reads. Both scored
+# about 15% and I nearly concluded neither was usable.
+#
+# Plus or minus 12 frames is 279 ms, wider than any timing error somebody makes
+# on a line they know and narrow enough not to lock onto the next syllable.
+LINE_SHIFT = 12
+# Under this much pitch agreement the alignment is not measuring time. A line
+# sung to a different tune has an arbitrary best shift, and a confident
+# millisecond figure on top of that is a lie with a decimal point in it.
+TIMING_NEEDS_CENTS = 200.0
+
 
 @dataclass
 class Track:
@@ -132,6 +173,11 @@ class LineScore:
     flat_or_sharp: float | None
     frames: int                # frames where BOTH of you were sounding
     ref_frames: int = 0        # frames where the SINGER was sounding
+    # Positive means you came in LATE on this line, in milliseconds, after your
+    # own latency has been taken out. None when the line was not sung, was too
+    # short, or was sung far enough off the tune that its best alignment is not
+    # measuring time at all.
+    late_ms: float | None = None
 
     @property
     def unsung(self) -> bool:
@@ -210,7 +256,21 @@ def _diff(a: Track, b: Track, shift: int = 0) -> np.ndarray:
 
 
 def offset(a: Track, b: Track, max_shift: int = MAX_SHIFT) -> int:
-    """How many frames late `b` is against `a`, by search.
+    """The shift that ALIGNS `b` to `a`, by search. Feed it to `_diff`.
+
+    SIGN, measured rather than described, because this docstring used to read
+    "how many frames late b is against a" and that is the negation of what it
+    returns. A take arriving 8 frames late gives -8.
+
+        b late by  -8 frames -> offset(a, b) = +8
+        b late by  +8 frames -> offset(a, b) = -8
+
+    The label was harmless for as long as nothing read the number as a
+    quantity: `_diff` consumes it to cancel the delay, so any consistent sign
+    aligns correctly, and `shift_ms` was reported without anybody interpreting
+    its direction. It stopped being harmless the moment `late_ms` tried to tell
+    a person whether they were behind the beat, which is why `line_late_ms`
+    negates it. Do not "tidy" that minus sign away.
 
     The take is aligned by construction, because the stage starts the recorder
     against playback. It is not aligned EXACTLY: there is latency between
@@ -282,11 +342,81 @@ def per_line(a: Track, b: Track, shift: int, lines) -> list:
             out.append(LineScore(c.text, c.start, c.end, None, None,
                                  int(d.size), ref_frames))
             continue
+        cents = float(np.median(np.abs(d)))
         out.append(LineScore(c.text, c.start, c.end,
-                             round(float(np.median(np.abs(d))), 1),
+                             round(cents, 1),
                              round(float(np.median(d)), 1), int(d.size),
-                             ref_frames))
+                             ref_frames,
+                             late_ms=line_late_ms(sa, sb, cents)))
     return out
+
+
+def line_late_ms(sa: Track, sb: Track, cents: float) -> float | None:
+    """How late this line was, in ms, against the take's own baseline.
+
+    `sa` and `sb` come out of `_window()`, which has already applied the global
+    shift, so a further search between them returns the RESIDUAL: the part of
+    the timing that is this line rather than the whole take's latency.
+
+    Refuses rather than guesses when the line was sung too far off the tune to
+    align. Every millisecond figure here is only as meaningful as the pitch
+    agreement underneath it, and a line sung to a different melody will still
+    produce a best shift.
+    """
+    if cents > TIMING_NEEDS_CENTS:
+        return None
+    # NEGATED on purpose. offset() returns the shift that ALIGNS the take, which
+    # is the negation of how late the take is; see its docstring for the
+    # measured table. Positive here means behind the words, which is the only
+    # direction a person can act on.
+    r = offset(sa, sb, max_shift=LINE_SHIFT)
+    return round(-r * FRAME_MS, 1)
+
+
+def timing(lines: list) -> dict | None:
+    """Whether you drag or rush, and the line you were furthest out on.
+
+    Reported as a signed median rather than a mean: one line where the search
+    hit its stop should not move the verdict, and a singer who is late on half
+    the lines and early on the other half is not "on time", which is what a
+    mean would call them. `spread_ms` is what says which of those you are.
+
+    Deliberately NOT folded into the pitch headline. Being flat and being late
+    are different mistakes with different fixes, and the whole reason this
+    exists is that they were being reported as one number.
+    """
+    vals = [l.late_ms for l in lines if l.late_ms is not None]
+    if len(vals) < 3:
+        return None
+    a = np.array(vals, dtype=float)
+    worst = max((l for l in lines if l.late_ms is not None),
+                key=lambda l: abs(l.late_ms))
+    return {
+        "median_ms": round(float(np.median(a)), 1),
+        "spread_ms": round(float(np.percentile(a, 90) - np.percentile(a, 10)), 1),
+        "share_tight": round(float(np.mean(np.abs(a) <= FRAME_MS * 2)), 3),
+        "lines_timed": len(vals),
+        "worst": {"text": worst.text, "late_ms": worst.late_ms,
+                  "start": worst.start},
+    }
+
+
+def timing_headline(t: dict | None) -> str | None:
+    """One sentence, in the register the pitch headline already uses.
+
+    A millisecond figure means nothing to anybody singing. Half a frame either
+    way is not a thing a person can act on; being consistently a third of a
+    second behind is.
+    """
+    if not t:
+        return None
+    m, spread = t["median_ms"], t["spread_ms"]
+    if abs(m) <= FRAME_MS * 2 and spread <= FRAME_MS * 6:
+        return "Your timing is good, you sit right on the words"
+    if abs(m) <= FRAME_MS * 2:
+        return "On the beat on average, but you wander either side of it"
+    word = "behind" if m > 0 else "ahead of"
+    return f"You sing about {abs(m):.0f} ms {word} the words"
 
 
 def coverage(lines: list) -> tuple:

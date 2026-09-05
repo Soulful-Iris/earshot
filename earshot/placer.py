@@ -53,10 +53,16 @@ def score_take(job: Path, take: Path, vocals: Path) -> None:
         lines = video.cues(_words.load(wjson).words)
     scored = unison.per_line(ref, yours, shift, lines) if lines else []
     best, worst = unison.best_and_worst(scored)
+    # Reported BESIDE the pitch verdict, never folded into it. Being flat and
+    # being late are different mistakes with different fixes, and the reason
+    # this exists is that they were arriving as one number.
+    tim = unison.timing(scored)
 
     write_status(job, unison={
         "state": "done",
         "headline": unison.headline(v, scored),
+        "timing_headline": unison.timing_headline(tim),
+        "timing": tim,
         **v.as_dict(),
         "best": None if best is None else
                 {"text": best.text, "cents": best.median_cents},
@@ -65,9 +71,12 @@ def score_take(job: Path, take: Path, vocals: Path) -> None:
                   "signed": worst.flat_or_sharp},
         "lines": [{"text": l.text, "start": round(l.start, 2),
                    "end": round(l.end, 2), "cents": l.median_cents,
-                   "signed": l.flat_or_sharp} for l in scored],
+                   "signed": l.flat_or_sharp, "late_ms": l.late_ms}
+                  for l in scored],
         "contours": unison.contours(ref, yours, shift)})
     print(f"unison: {unison.headline(v, scored)}", flush=True)
+    if tim:
+        print(f"timing: {unison.timing_headline(tim)}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
