@@ -834,6 +834,32 @@ const $stage = () => document.getElementById('stage');
 // looked like the stems underneath them.
 function singDoor(d) {
   const L = d.liveroom || {};
+
+  // The video, built once here because BOTH the scored door and the swept one
+  // need it. The take audio is deleted after a few hours and the encore is
+  // uploaded, so the swept state is precisely when this is the only thing
+  // left -- and the first version rendered it only in the `done` branch, so
+  // it vanished from the screen exactly when it became the point.
+  const E = d.encore || {};
+  let film = '';
+  if (E.state === 'done' && E.file) {
+    film = `<div class=s style="margin-top:.9rem">Your take, on the record,
+        with the singer's pitch in gold and yours in white.</div>
+      <video controls playsinline preload=metadata
+             poster="/jobs/${jobId}/poster.jpg"
+             src="/jobs/${jobId}/${E.file}"></video>
+      <a class=dl href="/jobs/${jobId}/${E.file}" download>Download the video</a>`;
+  } else if (E.state === 'working') {
+    film = `<div class=s style="margin-top:.9rem">Building your video&hellip;
+      ${esc(E.stage || '')}</div>`;
+  } else if (E.state === 'failed') {
+    film = `<div class=s style="margin-top:.9rem">The video did not build
+      (${esc(E.why || 'unknown')}). Everything else here is unaffected.</div>`;
+  } else if (E.state === 'none') {
+    film = `<div class=s style="margin-top:.9rem">No video for this one:
+      it needs a take, a score and the record's own footage.</div>`;
+  }
+
   const shell = (kind, title, sub, cta, extra) =>
     `<div class="door primary"><div class=k>${kind}</div>
      <div class=t>${title}</div><div class=s>${sub}</div>
@@ -898,28 +924,8 @@ function singDoor(d) {
         ${one(L.placed, 'You in their room', 'same take, placed')}
       </div></details>`;
 
-    // The video, above the two raw mixes, because it is the thing somebody
-    // would actually send to a person and they are the workings. A take with
-    // no video says so in one line rather than showing an empty player.
-    const E = d.encore || {};
-    let film = '';
-    if (E.state === 'done' && E.file) {
-      film = `<div class=s style="margin-top:.9rem">Your take, on the record,
-          with the singer's pitch in gold and yours in white.</div>
-        <video controls playsinline preload=metadata
-               poster="/jobs/${jobId}/poster.jpg"
-               src="/jobs/${jobId}/${E.file}"></video>
-        <a class=dl href="/jobs/${jobId}/${E.file}" download>Download the video</a>`;
-    } else if (E.state === 'working') {
-      film = `<div class=s style="margin-top:.9rem">Building your video&hellip;
-        ${esc(E.stage || '')}</div>`;
-    } else if (E.state === 'failed') {
-      film = `<div class=s style="margin-top:.9rem">The video did not build
-        (${esc(E.why || 'unknown')}). Everything else here is unaffected.</div>`;
-    } else if (E.state === 'none') {
-      film = `<div class=s style="margin-top:.9rem">No video for this one:
-        it needs a take, a score and the record's own footage.</div>`;
-    }
+    // Above the two raw mixes, because it is the thing somebody would send to
+    // a person and they are the workings.
     return shell('Your take', head, sub, cta, film + takes);
   }
   // The take's audio has been swept. The SCORE survives, because it lives in
@@ -928,15 +934,23 @@ function singDoor(d) {
   // pretend otherwise.
   if (L.state === 'gone') {
     const U = d.unison || {};
+    // "nothing left to play back" was true when the raw take was the only
+    // artefact. It stops being true the moment an encore exists, because that
+    // one is uploaded and survives the sweep. A sentence that goes stale in
+    // the direction of understating what somebody still has is the same
+    // failure as the page offering files that are not there, pointed the
+    // other way.
+    const kept = (E.state === 'done' && E.file);
     return shell('Your take',
       U.state === 'done' ? esc(U.headline) : 'You sang this one',
       `${U.state === 'done' && U.worst
          ? `Sing again: <b class=bad>${esc(U.worst.text)}</b>,
             ${Math.round(U.worst.cents)} cents
             ${U.worst.signed < 0 ? 'flat' : 'sharp'}.<br>` : ''}
-       ${esc(L.why || 'the recording was cleared')}, so there is nothing left
-       to play back. The score is kept.`,
-      `<button class=go id=singgo>Sing it again</button>`);
+       ${esc(L.why || 'the recording was cleared')}, so the raw mixes are gone.
+       ${kept ? 'Your video and your score are kept.' : 'The score is kept.'}`,
+      `<button class=go id=singgo>Sing it again</button>`,
+      film);
   }
   if (L.state === 'refused')
     return shell('Perform it', 'Not this take', esc(L.why),
