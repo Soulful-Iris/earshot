@@ -164,8 +164,29 @@ def _plot(canvas: np.ndarray, ys: np.ndarray, colour, width: int) -> None:
         canvas[lo:hi, x] = (r, g, b, 255)
 
 
-def strip(contours: dict, seconds: float) -> np.ndarray:
-    """The whole song's two pitch lines, as one wide RGBA image."""
+def strip(contours: dict, seconds: float, shift_ms: float = 0.0) -> np.ndarray:
+    """The whole song's two pitch lines, as one wide RGBA image.
+
+    `shift_ms` puts YOUR line where your voice actually sounds, and without it
+    the picture disagrees with the audio by however late you were.
+
+    Wren found this, and it was not on the list of five things I asked him to
+    check. `unison.contours()` stamps every sample with the REFERENCE frame's
+    time (`ts.append(ja * HOP / SR)`) while reading your value from the take
+    frame at `jb = i`, which is `shift` frames away. That is correct and
+    deliberate for SCORING -- it is exactly what cancels recording latency
+    before comparing pitch. But `placed.mp3` is mixed by `_mix()` with no shift
+    applied anywhere, sample zero to sample zero, so the audio plays on the
+    take's raw clock while the white line was drawn on the reference's.
+
+    They are the same clock only when `shift == 0`. Measured on three real
+    takes on this disk: -23.22 ms, -92.88 ms and -371.52 ms. A third of a
+    second is not subtle.
+
+    In both branches of `contours()` the stored time is the true time minus
+    `shift * HOP / SR`, so the correction is one sign for both: read the stored
+    series at `grid + shift_ms/1000`.
+    """
     t = np.asarray(contours["t"], dtype=float)
     ref = np.array([np.nan if v is None else v for v in contours["ref"]], dtype=float)
     you = np.array([np.nan if v is None else v for v in contours["you"]], dtype=float)
@@ -175,7 +196,8 @@ def strip(contours: dict, seconds: float) -> np.ndarray:
 
     w = max(2, int(math.ceil(seconds * PX_PER_SEC)))
     grid = np.arange(w, dtype=float) / PX_PER_SEC
-    rs, ys = _resample(t, ref, grid), _resample(t, you, grid)
+    rs = _resample(t, ref, grid)
+    ys = _resample(t, you, grid + shift_ms / 1000.0)
     mid = _follow(t, ref, grid, centre)
 
     top, bot = mid + span / 2, mid - span / 2
@@ -252,8 +274,11 @@ def render(job_dir: Path, timeout: int = 3600) -> Path | None:
     if secs < 1.0:
         return None
 
+    # The take's own latency, so the white line lands where the voice sounds
+    # rather than where the scoring compared it. See strip().
+    shift_ms = float(u.get("shift_ms") or 0.0)
     png = out / "_strip.png"
-    png.write_bytes(_png(strip(u["contours"], secs + 2.0)))
+    png.write_bytes(_png(strip(u["contours"], secs + 2.0, shift_ms)))
 
     dest = out / NAME
     # overlay and drawbox do NOT share a variable namespace. overlay has W/H
