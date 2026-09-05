@@ -747,8 +747,207 @@ def apply_clarity(src: Path, out: Path, amount: float = CLARITY) -> dict:
     }
 
 
+# --- following the effect ---------------------------------------------------
+#
+# Bruno, 2026-09-05: "you do a good job at capturing the voice filter the song
+# has. But you have to understand. Voice filter almost changes every second.
+# Specially in the mini second it changes its important. Make sure to follow
+# effect"
+#
+# He is right and matchering is a single match over the whole file, which is
+# precisely the average he is objecting to.
+#
+# WHAT I MEASURED BEFORE BUILDING, on seven real vocal stems:
+#
+#   the ROOM does not change.  Per-gap RT60 has no time structure at all --
+#   lag-1 autocorrelation sits at or below a shuffled control on every song
+#   (z between -1.9 and +0.4), and a permutation test on section medians says
+#   the same (every z under 1). Twice tested, both able to say yes.
+#
+#   the COLOUR does.  Adjacent 8 s windows are 0.67-0.82x as different as
+#   distant ones, z from -4.1 to -6.5 against a shuffled-order control, in 5
+#   of 6 songs with enough material.
+#
+# So what he hears moving is the character, not the reverb length, and that is
+# a much better thing to discover before building than after.
+#
+# WHY 2 SECONDS AND NOT ONE. The structure gets *stronger* at finer windows --
+# z reaches -19 at 1 s -- and that is partly an artefact rather than a prize.
+# Adjacent one-second windows usually sit inside the same sung phrase, so they
+# share vowels and notes, not just treatment. Following at that resolution
+# would paint the record's vowel colouring onto his voice. At 8 s the phrase
+# confound is weak and the structure is still there, which is what makes it
+# real. 2 s windows on a 1 s hop keep his "changes every second" while each
+# estimate still spans more than one syllable.
+# OFF, and this is the honest part of the entry.
+#
+# The premise above is measured and holds. The implementation below does NOT
+# verify, and I could not make it verify tonight. The direct check -- correlate
+# the change follow_colour() actually made against the curve it meant to apply,
+# on a shared time grid, which should be near 1 by construction -- comes back
+# at -0.21, 0.01, 0.05, 0.10, -0.11 across five songs and undefined on two.
+# That is noise. Meanwhile it moves the audio by 2.7 dB on average and clamps
+# on every song, so what is written here is a thing that alters somebody's
+# voice by a curve I cannot show is the right curve.
+#
+# Three instruments misled me on this in one sitting: a per-index trajectory
+# comparison that could never have worked because the two tracks drop different
+# silent windows, a clamp sweep read through that broken comparison, and this
+# one, which is the first that could have said yes and did not.
+#
+# So it is off, the measurement tools stay, and the finding stays -- the
+# finding is the valuable half and it changes what the feature should even be.
+# Turning this on before the direct check reads near 1 would be shipping the
+# exact thing this whole file was written against.
+FOLLOW = 0.0
+FOLLOW_WIN = 2.0
+FOLLOW_HOP = 1.0
+FOLLOW_MAX_DB = 3.0
+
+
+def colour_track(path: Path, win_s: float = FOLLOW_WIN,
+                 hop_s: float = FOLLOW_HOP) -> tuple[np.ndarray, np.ndarray]:
+    """How this vocal's colour deviates from its own average, over time.
+
+    Returns (times, deviations) where each deviation is a third-octave curve in
+    dB relative to the file's OWN long-term spectrum. Relative on purpose: the
+    global colour is matchering's job and has already been done by the time
+    this runs, so what is left here is only the movement.
+
+    Near-silent windows are dropped rather than measured. The "colour" of a
+    gap between phrases is the noise floor, and imposing that on somebody is
+    how a follower turns into a random modulator.
+    """
+    # WORK_SR, not SR. The tail estimator runs at 16 kHz because a decay does
+    # not need more, but every third-octave band above 8 kHz then has no FFT
+    # bins in it and `spectrum()` returns -200 dB for each. That cancels in the
+    # comparisons `search()` uses, and it would NOT cancel here: it would come
+    # out as a constant offset across the top of every gain curve.
+    x = _mono(path, sr=WORK_SR)
+    n, hop = int(win_s * WORK_SR), int(hop_s * WORK_SR)
+    if x.size < n:
+        return np.zeros(0), np.zeros((0, len(BANDS)))
+    base = np.array(spectrum(x, sr=WORK_SR))
+    times, devs = [], []
+    for i in range(0, len(x) - n, hop):
+        seg = x[i:i + n]
+        if 20 * math.log10(float(np.sqrt(np.mean(seg ** 2))) + 1e-12) < -50:
+            continue
+        times.append((i + n / 2) / WORK_SR)
+        devs.append(np.array(spectrum(seg, sr=WORK_SR)) - base)
+    if not times:
+        return np.zeros(0), np.zeros((0, len(BANDS)))
+    return np.array(times), np.vstack(devs)
+
+
+def _band_gains_to_bins(dev: np.ndarray, freqs: np.ndarray) -> np.ndarray:
+    """A third-octave curve, interpolated onto FFT bin frequencies in log f."""
+    lb = np.log10(np.array(BANDS))
+    lf = np.log10(np.maximum(freqs, 1.0))
+    return np.interp(lf, lb, dev, left=dev[0], right=dev[-1])
+
+
+def follow_colour(take: Path, reference: Path, out: Path,
+                  amount: float = FOLLOW,
+                  max_db: float = FOLLOW_MAX_DB) -> dict:
+    """Impose the reference vocal's colour MOVEMENT on the take, over time.
+
+    Only works because the two share a timeline: the take was sung against the
+    backing, so his second 90 is the record's second 90. This would be
+    meaningless on two unrelated recordings and it is not offered as a general
+    tool.
+
+    Bounded hard at `max_db` per band, and smoothed across windows, because the
+    failure mode is not "too little effect", it is a voice that swims.
+    """
+    t, devs = colour_track(reference)
+    x = _mono(take, sr=WORK_SR)
+    nfft, hop = 4096, 1024
+    if devs.shape[0] < 2 or x.size < nfft:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(take),
+                        "-ar", str(WORK_SR), "-ac", "2", str(out)],
+                       check=True, timeout=1800)
+        return {"followed": False, "why": "not enough usable windows"}
+
+    # Smooth the trajectory across time before imposing it. One window's
+    # spectrum is an estimate, and an unsmoothed estimate applied as a gain is
+    # a tremolo nobody asked for.
+    k = np.array([0.25, 0.5, 0.25])
+    sm = np.vstack([np.convolve(devs[:, b], k, mode="same")
+                    for b in range(devs.shape[1])]).T
+    sm = np.clip(sm * amount, -max_db, max_db)
+
+    win = np.hanning(nfft)
+    freqs = np.fft.rfftfreq(nfft, 1 / WORK_SR)
+    acc = np.zeros(len(x) + nfft)
+    norm = np.zeros(len(x) + nfft)
+    for i in range(0, len(x) - nfft, hop):
+        centre = (i + nfft / 2) / WORK_SR
+        j = int(np.clip(np.searchsorted(t, centre), 0, len(t) - 1))
+        gain_db = _band_gains_to_bins(sm[j], freqs)
+        seg = np.fft.rfft(x[i:i + nfft] * win)
+        seg *= 10 ** (gain_db / 20)
+        acc[i:i + nfft] += np.fft.irfft(seg, nfft) * win
+        norm[i:i + nfft] += win ** 2
+    y = acc[:len(x)] / np.maximum(norm[:len(x)], 1e-9)
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    if peak > 0.99:
+        y = y * (0.99 / peak)
+
+    tmp = out.with_suffix(".raw.f32")
+    y.astype(np.float32).tofile(tmp)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "f32le",
+         "-ar", str(SR), "-ac", "1", "-i", str(tmp),
+         "-ar", str(WORK_SR), "-ac", "2", str(out)],
+        check=True, timeout=1800)
+    tmp.unlink(missing_ok=True)
+    return {
+        "followed": True,
+        "windows": int(devs.shape[0]),
+        "amount": round(amount, 3),
+        "max_db": round(max_db, 2),
+        "moved_db": round(float(np.mean(np.abs(sm))), 2),
+        "biggest_db": round(float(np.max(np.abs(sm))), 2),
+    }
+
+
+def trajectory_match(a: Path, b: Path) -> float:
+    """How much two vocals' colour MOVEMENTS agree, -1 to 1.
+
+    The control for follow_colour(), and the only one that can go red: after
+    following, the take's trajectory should look like the record's; before, it
+    should not. A "follower" that changed the sound without moving this number
+    would be doing something, just not the thing it is named for.
+    """
+    ta, da = colour_track(a)
+    tb, db_ = colour_track(b)
+    if da.shape[0] < 3 or db_.shape[0] < 3:
+        return float("nan")
+
+    # ALIGN ON TIME, not on index. colour_track() drops near-silent windows,
+    # and two recordings are silent in different places -- so element i of one
+    # track and element i of the other are different moments. Comparing them
+    # positionally returns about zero however well the follow worked, and it
+    # did: this control reported the feature dead across a clamp sweep from
+    # 3 dB to 60 dB, saturating at r=0.04 while the audio moved by 8 dB. I was
+    # one message away from telling him it could not be done.
+    lo, hi = max(ta[0], tb[0]), min(ta[-1], tb[-1])
+    if hi - lo < FOLLOW_WIN * 3:
+        return float("nan")
+    grid = np.arange(lo, hi, FOLLOW_HOP)
+    u = np.vstack([np.interp(grid, ta, da[:, k])
+                   for k in range(da.shape[1])]).ravel()
+    v = np.vstack([np.interp(grid, tb, db_[:, k])
+                   for k in range(db_.shape[1])]).ravel()
+    u, v = u - u.mean(), v - v.mean()
+    d = float(np.linalg.norm(u) * np.linalg.norm(v))
+    return float(u @ v / d) if d else float("nan")
+
+
 def place(take: Path, vocals: Path, band: Path, room: Candidate,
-          out_dir: Path, colour: bool = True, clarity: float = CLARITY) -> dict:
+          out_dir: Path, colour: bool = True, clarity: float = CLARITY,
+          follow: float = FOLLOW) -> dict:
     """The take, in the record's room, at the record's colour and level, mixed.
 
     The order matters and every step reports what it moved:
@@ -800,6 +999,23 @@ def place(take: Path, vocals: Path, band: Path, room: Candidate,
             steps["colour"] = f"skipped: {type(e).__name__}: {e}"[:160]
             stage = wet
 
+    # The MOVEMENT, on top of the average. matchering has just matched the
+    # whole file to the whole file, which is exactly the average he objected
+    # to; this puts the record's own colour trajectory back on top of it.
+    if follow > 0:
+        followed = out_dir / "_follow.wav"
+        try:
+            before = trajectory_match(stage, vocals)
+            steps["follow"] = follow_colour(stage, vocals, followed, follow)
+            if steps["follow"].get("followed"):
+                steps["follow"]["trajectory_before"] = round(before, 3)
+                steps["follow"]["trajectory_after"] = round(
+                    trajectory_match(followed, vocals), 3)
+                stage = followed
+                steps["after_follow_db"] = round(speech_db(stage), 2)
+        except Exception as e:                                    # noqa: BLE001
+            steps["follow"] = {"skipped": f"{type(e).__name__}: {e}"[:160]}
+
     # On top of the colour, which is where he asked for it and where it has to
     # be: matchering matches toward the record's curve, so a presence lift
     # applied before it is simply matched back out.
@@ -831,7 +1047,7 @@ def place(take: Path, vocals: Path, band: Path, room: Candidate,
     steps["placed"] = placed.name
     steps["unplaced"] = unplaced.name
     for scratch in ("_wet.wav", "_stereo.wav", "_matched.wav", "_level.wav",
-                    "_ref.wav", "_take.wav", "_clear.wav"):
+                    "_ref.wav", "_take.wav", "_clear.wav", "_follow.wav"):
         (out_dir / scratch).unlink(missing_ok=True)
     return steps
 
