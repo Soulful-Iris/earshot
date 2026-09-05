@@ -79,6 +79,35 @@ def score_take(job: Path, take: Path, vocals: Path) -> None:
         print(f"timing: {unison.timing_headline(tim)}", flush=True)
 
 
+def make_encore(job: Path) -> None:
+    """Build the take video, upload it, and say so in the status.
+
+    Uploaded, unlike the take audio itself. Stems and videos go to S3 and the
+    download route pulls them back, which is why `sweep()` can free the local
+    media and every link keeps working; `placed.mp3` and `unplaced.mp3` never
+    were, so they vanish after a few hours. This is the artefact somebody would
+    actually send to a person, so it is the one that has to outlive the sweep.
+    """
+    from . import encore
+    from . import studio
+
+    write_status(job, encore={"state": "working",
+                              "stage": "drawing the two pitch lines"})
+    made = encore.render(job)
+    if made is None:
+        # Not a failure. A job with no take, no score or no source video has
+        # nothing to build from, and the door says so in one line rather than
+        # offering a player with nothing behind it.
+        write_status(job, encore={"state": "none"})
+        print("encore: nothing to build from", flush=True)
+        return
+
+    studio.put_s3(job.name, made)
+    write_status(job, encore={"state": "done", "file": made.name,
+                              "bytes": made.stat().st_size})
+    print(f"encore: {made.name} ({made.stat().st_size // 1024} KB)", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) < 2:
@@ -145,6 +174,19 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:                               # noqa: BLE001
             traceback.print_exc()
             write_status(job, unison={"state": "failed",
+                                      "why": f"{type(e).__name__}: {e}"[:200]})
+
+        # --- the thing you keep ---------------------------------------------
+        #
+        # Last, and wrapped like the scoring above, for the same reason: a
+        # video that fails to build must never lose a take that is already
+        # mixed and on disk. It needs both the placement and the score, so it
+        # cannot run any earlier than this.
+        try:
+            make_encore(job)
+        except Exception as e:                               # noqa: BLE001
+            traceback.print_exc()
+            write_status(job, encore={"state": "failed",
                                       "why": f"{type(e).__name__}: {e}"[:200]})
         return 0
 

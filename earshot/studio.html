@@ -897,7 +897,30 @@ function singDoor(d) {
         ${one(L.unplaced, 'Just you on top', 'the take as recorded')}
         ${one(L.placed, 'You in their room', 'same take, placed')}
       </div></details>`;
-    return shell('Your take', head, sub, cta, takes);
+
+    // The video, above the two raw mixes, because it is the thing somebody
+    // would actually send to a person and they are the workings. A take with
+    // no video says so in one line rather than showing an empty player.
+    const E = d.encore || {};
+    let film = '';
+    if (E.state === 'done' && E.file) {
+      film = `<div class=s style="margin-top:.9rem">Your take, on the record,
+          with the singer's pitch in gold and yours in white.</div>
+        <video controls playsinline preload=metadata
+               poster="/jobs/${jobId}/poster.jpg"
+               src="/jobs/${jobId}/${E.file}"></video>
+        <a class=dl href="/jobs/${jobId}/${E.file}" download>Download the video</a>`;
+    } else if (E.state === 'working') {
+      film = `<div class=s style="margin-top:.9rem">Building your video&hellip;
+        ${esc(E.stage || '')}</div>`;
+    } else if (E.state === 'failed') {
+      film = `<div class=s style="margin-top:.9rem">The video did not build
+        (${esc(E.why || 'unknown')}). Everything else here is unaffected.</div>`;
+    } else if (E.state === 'none') {
+      film = `<div class=s style="margin-top:.9rem">No video for this one:
+        it needs a take, a score and the record's own footage.</div>`;
+    }
+    return shell('Your take', head, sub, cta, film + takes);
   }
   // The take's audio has been swept. The SCORE survives, because it lives in
   // status.json rather than in a file, so the thing worth keeping is still

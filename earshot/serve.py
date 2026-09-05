@@ -490,6 +490,10 @@ class Handler(BaseHTTPRequestHandler):
             # fish for a file the worker never made.
             if (st.get("lyrics") or {}).get("file"):
                 allowed.add(st["lyrics"]["file"])
+            # The take video, same rule again: named by the status, never by
+            # the URL, and only once the status says it was actually built.
+            if (st.get("encore") or {}).get("file"):
+                allowed.add(st["encore"]["file"])
             if wanted not in allowed:
                 self._send(404, b"no", "text/plain")
                 return
